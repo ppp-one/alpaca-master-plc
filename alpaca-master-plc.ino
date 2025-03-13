@@ -54,9 +54,6 @@ void forwardRequest(Request &req, Response &res)
   case Request::GET:
     methodStr = "GET";
     break;
-  case Request::POST:
-    methodStr = "POST";
-    break;
   case Request::PUT:
     methodStr = "PUT";
     break;
@@ -102,8 +99,8 @@ void forwardRequest(Request &req, Response &res)
 
     ethClient.println("Connection: close");
 
-    // Add Content-Length and Content-Type for POST/PUT requests with body
-    if ((req.method() == Request::POST || req.method() == Request::PUT) &&
+    // Add Content-Length and Content-Type for PUT requests with body
+    if ((req.method() == Request::PUT) &&
         requestBuffer.length() > 0)
     {
       ethClient.print("Content-Length: ");
