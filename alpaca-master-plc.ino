@@ -1,5 +1,8 @@
 #include <Ethernet.h>
 #include <aWOT.h>
+#include <ArduinoJson.h>
+
+using namespace mbed;
 
 // Network configuration for your Arduino
 byte mac[] = {0xA8, 0x61, 0x0A, 0x50, 0x9D, 0x95};
@@ -8,18 +11,30 @@ IPAddress gateway(192, 168, 1, 1);
 IPAddress subnet(255, 255, 255, 0);
 IPAddress dns(8, 8, 8, 8);
 
-// Target server configuration
-IPAddress targetServerIP(192, 168, 1, 14); // Change to your target device's IP
-int targetServerPort = 80;                 // Change to your target device's port
+// Target server IP and port
+IPAddress domeAlpacaIP(192, 168, 1, 7);
+int domeAlpacaPort = 80;
+
+IPAddress telescopeAlpacaIP(192, 168, 1, 7);
+int telescopeAlpacaPort = 80;
+
+IPAddress telescopeDirectIP(192, 168, 1, 7);
+int telescopeDirectPort = 80;
+
+IPAddress safetyMonitorAlpacaIP(192, 168, 1, 7);
+int safetyMonitorAlpacaPort = 80;
+
+// Blocking flags
+volatile bool blockDome = false;
+volatile bool blockTelescope = false;
+bool requestHappening = false;
+
+// Thread for reading states
+static rtos::Thread ReadStatesThread;
 
 // Initialize the Ethernet server and aWOT application
 EthernetServer server(80);
 Application app;
-
-// Create Ethernet client for HttpClient to use
-EthernetClient ethClient;
-// Buffer for payload data
-String requestBuffer;
 
 // Debug flag - set to true for Serial debugging
 const bool DEBUG = true;
@@ -39,6 +54,85 @@ void debugPrint(const char *message, auto value)
     Serial.print(message);
     Serial.println(value);
   }
+}
+
+// Read all states
+void readStates()
+{
+  while (true)
+  {
+    // TODO: wrap in try catch
+
+    digitalWrite(LED_BUILTIN, HIGH);
+
+    // checks
+    int domeShutterState = getDomeShutterState();
+    Serial.print("Dome shutter state: ");
+    Serial.println(domeShutterState);
+    bool telescopeParked = getTelescopeParkedState();
+    Serial.print("Telescope parked: ");
+    Serial.println(telescopeParked);
+    bool safetyMonitorState = getSafetyMonitorState();
+    Serial.print("Safety monitor state: ");
+    Serial.println(safetyMonitorState);
+
+    rtos::ThisThread::sleep_for(500);
+    digitalWrite(LED_BUILTIN, LOW);
+    rtos::ThisThread::sleep_for(500);
+  }
+}
+
+int getDomeShutterState()
+{
+  String payload = sendRequest("GET", "/api/v1/dome/0/shutterstatus", "", domeAlpacaIP, domeAlpacaPort);
+
+  DynamicJsonDocument doc(1024); // Heap-allocated for variable sizes
+
+  if (deserializeJson(doc, payload.c_str()) != DeserializationError::Ok)
+  {
+    debugPrint("Parsing failed for getDomeShutterState");
+    return 4;
+  }
+
+  return doc["Value"];
+}
+
+bool getTelescopeParkedState()
+{
+  String payload = sendRequest("GET", "/api/v1/telescope/0/atpark", "", telescopeAlpacaIP, telescopeAlpacaPort);
+
+  DynamicJsonDocument doc(1024); // Heap-allocated for variable sizes
+
+  if (deserializeJson(doc, payload.c_str()) != DeserializationError::Ok)
+  {
+    debugPrint("Parsing failed for getTelescopeParkedState");
+    return false;
+  }
+
+  return doc["Value"];
+}
+
+bool getSafetyMonitorState()
+{
+  String payload = sendRequest("GET", "/api/v1/safetymonitor/0/issafe", "", safetyMonitorAlpacaIP, safetyMonitorAlpacaPort);
+
+  DynamicJsonDocument doc(1024); // Heap-allocated for variable sizes
+
+  if (deserializeJson(doc, payload.c_str()) != DeserializationError::Ok)
+  {
+    debugPrint("Parsing failed for getSafetyMonitorState");
+    return false;
+  }
+
+  return doc["Value"];
+}
+
+void closeObservatory()
+{
+  // Close the dome
+  blockDome = true;
+  // Close the telescope
+  blockTelescope = true;
 }
 
 // Function to forward a request to the target device
@@ -62,12 +156,36 @@ void forwardRequest(Request &req, Response &res)
   }
 
   // Read the request body
-  requestBuffer = req.readString();
+  String requestBuffer = req.readString();
 
+  String body = sendRequest(methodStr, path, requestBuffer, domeAlpacaIP, domeAlpacaPort);
+
+  res.set("Content-Type", "application/json");
+  res.print(body.c_str());
+}
+
+String sendRequest(const char *methodStr, const char *path, String requestBuffer, IPAddress targetServerIP, int targetServerPort)
+{
+  if (requestHappening)
+  {
+    debugPrint("Request already happening");
+    while (requestHappening)
+    {
+      rtos::ThisThread::sleep_for(100);
+    }
+  }
+  else
+  {
+    requestHappening = true;
+  }
   debugPrint("Request method: ", methodStr);
   debugPrint("Request path: ", path);
   debugPrint("Request body: ", requestBuffer.c_str());
 
+  // Create Ethernet client
+  EthernetClient ethClient;
+
+  // Attempt to connect to the target server
   if (ethClient.connect(targetServerIP, targetServerPort))
   {
     debugPrint("Connected to target server");
@@ -78,13 +196,13 @@ void forwardRequest(Request &req, Response &res)
     ethClient.print(path);
 
     // For GET requests, append parameters to the URL if they exist
-    if (req.method() == Request::GET && requestBuffer.length() > 0)
+    if (methodStr == "GET" && requestBuffer.length() > 0)
     {
       ethClient.print("?");
       ethClient.print(requestBuffer);
     }
 
-    ethClient.println(" HTTP/1.0"); // Use HTTP/1.1 instead of 1.0
+    ethClient.println(" HTTP/1.0");
 
     // Add required headers
     ethClient.print("Host: ");
@@ -100,7 +218,7 @@ void forwardRequest(Request &req, Response &res)
     ethClient.println("Connection: close");
 
     // Add Content-Length and Content-Type for PUT requests with body
-    if ((req.method() == Request::PUT) &&
+    if ((methodStr == "PUT") &&
         requestBuffer.length() > 0)
     {
       ethClient.print("Content-Length: ");
@@ -124,9 +242,10 @@ void forwardRequest(Request &req, Response &res)
   else
   {
     debugPrint("Connection to target server failed");
-    res.status(502); // Bad Gateway
-    res.print("{\"error\":\"Unable to connect to target server\"}");
-    return;
+    requestHappening = false;
+    // res.status(502); // Bad Gateway
+    // res.print("{\"error\":\"Unable to connect to target server\"}");
+    return "";
   }
 
   String header = "";
@@ -153,13 +272,16 @@ void forwardRequest(Request &req, Response &res)
       }
     }
   }
-  res.set("Content-Type", "application/json");
-  res.print(body.c_str());
-
-  debugPrint("Header:", header);
-  debugPrint("Body:", body);
 
   ethClient.stop();
+
+  // debugPrint("Header:", header);
+  debugPrint("Body:", body);
+  debugPrint(" ");
+
+  requestHappening = false;
+
+  return body;
 }
 
 void setup()
@@ -173,15 +295,17 @@ void setup()
     }
   }
 
+  // set pins for LEDs
+  pinMode(LED_BUILTIN, OUTPUT);
+
   // Initialize Ethernet connection
   Ethernet.begin(mac, ip, dns, gateway, subnet);
   ;
 
-  if (DEBUG)
-  {
-    Serial.print("Server started at ");
-    Serial.println(Ethernet.localIP());
-  }
+  debugPrint("Server started at ", Ethernet.localIP());
+
+  // start ReadStatesThread thread
+  ReadStatesThread.start(readStates);
 
   // Set up aWOT routes
   app.use(&forwardRequest);
@@ -198,6 +322,7 @@ void loop()
 
   if (client.connected())
   {
+    debugPrint("Client connected");
     app.process(&client);
     client.stop();
   }
