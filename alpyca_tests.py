@@ -24,16 +24,16 @@ t.Park()
 # print(c.CCDTemperature)
 
 start_time = time.time()
-total = 1000
+total = 100
 for i in range(total):
-    # print(t.SiderealTime)
+    print(t.SiderealTime)
     # print(c.CCDTemperature)
-    r = requests.put(
-        f"http://{ip}/api/v1/telescope/0/connected",
-        data={"Connected": True, "ClientTransactionID": i, "ClientID": 999},
-    )
-    print(r.text)
-    t.Connected = True
+    # r = requests.put(
+    #     f"http://{ip}/api/v1/telescope/0/connected",
+    #     data={"Connected": True, "ClientTransactionID": i, "ClientID": 999},
+    # )
+    # print(r.text)
+    # t.Connected = True
     # # print(c.CCDTemperature)
     # print(t.Connected)
     # t.Connected = False
