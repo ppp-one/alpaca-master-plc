@@ -68,10 +68,11 @@ void readStates()
 
     // checks
     bool safetyMonitorState = getSafetyMonitorState();
-    debugPrint("Safety monitor state: ", safetyMonitorState);
     int domeShutterState = getDomeShutterState();
-    debugPrint("Dome shutter state: ", domeShutterState);
     bool telescopeParked = getTelescopeDirectParkedState();
+
+    debugPrint("Safety monitor state: ", safetyMonitorState);
+    debugPrint("Dome shutter state: ", domeShutterState);
     debugPrint("Telescope parked state: ", telescopeParked);
 
     if (domeShutterState != 0) // if not open
@@ -94,6 +95,8 @@ void readStates()
 
     if (safetyMonitorState == false)
     {
+      blockDome = true;
+      blockTelescope = true;
       closeObservatory();
     }
 

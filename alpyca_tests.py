@@ -29,11 +29,19 @@ d = Dome(ip, 0)
 # print(c.CCDTemperature)
 # d.CloseShutter()
 
-# r = requests.put(
-#     f"http://{ip}/api/v1/dome/0/openshutter",
-#     data={"ClientTransactionID": 123, "ClientID": 999},
-# )
-# print(r.text)
+r = requests.put(
+    f"http://{ip}/api/v1/telescope/0/unpark",
+    data={"ClientTransactionID": 123, "ClientID": 999},
+    timeout=10,
+)
+print(r.text)
+
+r = requests.put(
+    f"http://{ip}/api/v1/dome/0/openshutter",
+    data={"ClientTransactionID": 123, "ClientID": 999},
+    timeout=10,
+)
+print(r.text)
 
 start_time = time.time()
 total = 10
