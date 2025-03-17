@@ -28,6 +28,7 @@ int safetyMonitorAlpacaPort = 80;
 volatile bool blockDome = false;
 volatile bool blockTelescope = false;
 bool requestHappening = false;
+const unsigned long FUNCTION_TIMEOUT = 60000; // 60 seconds total timeout
 
 // Thread for reading states
 static rtos::Thread ReadStatesThread;
@@ -326,14 +327,24 @@ void forwardRequest(Request &req, Response &res)
   res.print(body.c_str());
 }
 
-// Function to send a request to a server and receive a response
+// Function to forward a request to a server and receive a response
 String sendRequest(const char *methodStr, const char *path, String requestBuffer, IPAddress targetServerIP, int targetServerPort)
 {
+  // Overall function timeout
+  unsigned long functionStartTime = millis();
+
   if (requestHappening)
   {
     debugPrint("Request already happening");
+
     while (requestHappening)
     {
+      if (millis() - functionStartTime > FUNCTION_TIMEOUT)
+      {
+        debugPrint("Timed out waiting for previous request");
+        return ""; // Or return an error message
+      }
+
       rtos::ThisThread::sleep_for(100);
     }
   }
@@ -341,6 +352,7 @@ String sendRequest(const char *methodStr, const char *path, String requestBuffer
   {
     requestHappening = true;
   }
+
   debugPrint("Request method: ", methodStr);
   debugPrint("Request path: ", path);
   debugPrint("Request body: ", requestBuffer.c_str());
@@ -348,8 +360,30 @@ String sendRequest(const char *methodStr, const char *path, String requestBuffer
   // Create Ethernet client
   EthernetClient ethClient;
 
+  // Set timeout for the client operations
+  ethClient.setTimeout(FUNCTION_TIMEOUT); // FUNCTION_TIMEOUT seconds timeout for read operations
+
   // Attempt to connect to the target server
-  if (ethClient.connect(targetServerIP, targetServerPort))
+  bool connectSuccess = false;
+  while (!connectSuccess)
+  {
+    if (ethClient.connect(targetServerIP, targetServerPort))
+    {
+      connectSuccess = true;
+      break;
+    }
+
+    // Check overall function timeout
+    if (millis() - functionStartTime > FUNCTION_TIMEOUT)
+    {
+      debugPrint("Function execution timeout during connection");
+      break;
+    }
+
+    rtos::ThisThread::sleep_for(100);
+  }
+
+  if (connectSuccess)
   {
     debugPrint("Connected to target server");
 
@@ -406,6 +440,7 @@ String sendRequest(const char *methodStr, const char *path, String requestBuffer
   {
     debugPrint("Connection to target server failed");
     requestHappening = false;
+    ethClient.stop();
     // res.status(502); // Bad Gateway
     // res.print("{\"error\":\"Unable to connect to target server\"}");
     return "";
@@ -417,6 +452,13 @@ String sendRequest(const char *methodStr, const char *path, String requestBuffer
 
   while (ethClient.connected())
   {
+    // Check response timeout
+    if (millis() - functionStartTime > FUNCTION_TIMEOUT)
+    {
+      debugPrint("Response read timeout");
+      break;
+    }
+
     if (ethClient.available())
     {
       char c = ethClient.read();
@@ -450,36 +492,69 @@ String sendRequest(const char *methodStr, const char *path, String requestBuffer
 // Function to send data to a server and receive response
 String simpleNetcat(IPAddress host, int port, String content, int sleep_ms)
 {
+
+  // Overall function timeout
+  unsigned long functionStartTime = millis();
+
   String response = "";
   EthernetClient netCatClient;
 
+  // Set timeout for client operations
+  netCatClient.setTimeout(FUNCTION_TIMEOUT); // FUNCTION_TIMEOUT seconds timeout for read operations
+
+  // Attempt to connect to the target server
+  bool connectSuccess = false;
+  while (!connectSuccess)
+  {
+    if (netCatClient.connect(host, port))
+    {
+      connectSuccess = true;
+      break;
+    }
+
+    // Check overall function timeout
+    if (millis() - functionStartTime > FUNCTION_TIMEOUT)
+    {
+      debugPrint("Function execution timeout during connection");
+      break;
+    }
+
+    rtos::ThisThread::sleep_for(100);
+  }
+
   // Try to connect to the server
-  if (netCatClient.connect(host, port))
+  if (connectSuccess)
   {
     // Send the content
     netCatClient.print(content);
-
-    // Wait before closing the connection
-    delay(sleep_ms);
-
-    // Read the response
-    while (netCatClient.available())
-    {
-      char c = netCatClient.read();
-      response += c;
-
-      // You can uncomment for debugging
-      // Serial.print(c);
-    }
-
-    // Close the connection
-    netCatClient.stop();
   }
   else
   {
-    // Connection failed
-    Serial.println("Connection failed");
+    debugPrint("Connection to target server failed");
+    netCatClient.stop();
+    return "";
   }
+
+  while (netCatClient.connected())
+  {
+    // Check response timeout
+    if (millis() - functionStartTime > FUNCTION_TIMEOUT)
+    {
+      debugPrint("Response read timeout");
+      break;
+    }
+
+    if (netCatClient.available())
+    {
+      char c = netCatClient.read();
+      response += c;
+    }
+  }
+
+  // Close the connection
+  netCatClient.stop();
+
+  debugPrint("Response:", response);
 
   return response;
 }
