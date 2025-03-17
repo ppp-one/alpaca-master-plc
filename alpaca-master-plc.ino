@@ -6,23 +6,23 @@ using namespace mbed;
 
 // Network configuration for your Arduino
 byte mac[] = {0xA8, 0x61, 0x0A, 0x50, 0x9D, 0x95};
-IPAddress ip(192, 168, 1, 177);
+IPAddress ip(192, 168, 1, 10);
 IPAddress gateway(192, 168, 1, 1);
 IPAddress subnet(255, 255, 255, 0);
 IPAddress dns(8, 8, 8, 8);
 
 // Target server IP and port
-IPAddress domeAlpacaIP(192, 168, 1, 14);
-int domeAlpacaPort = 80;
+IPAddress telescopeAlpacaIP(192, 168, 1, 2);
+int telescopeAlpacaPort = 11111;
 
-IPAddress telescopeAlpacaIP(192, 168, 1, 7);
-int telescopeAlpacaPort = 80;
-
-IPAddress telescopeDirectIP(192, 168, 1, 7);
+IPAddress telescopeDirectIP(192, 168, 1, 11);
 int telescopeDirectPort = 3490;
 
 IPAddress safetyMonitorAlpacaIP(192, 168, 1, 12);
 int safetyMonitorAlpacaPort = 80;
+
+IPAddress domeAlpacaIP(192, 168, 1, 14);
+int domeAlpacaPort = 80;
 
 // Blocking flags
 volatile bool blockDome = false;
@@ -74,7 +74,7 @@ void readStates()
     bool telescopeParked = getTelescopeDirectParkedState();
     debugPrint("Telescope parked state: ", telescopeParked);
 
-    if (domeShutterState != 0)
+    if (domeShutterState != 0) // if not open
     {
       blockTelescope = true;
     }
@@ -83,7 +83,7 @@ void readStates()
       blockTelescope = false;
     }
 
-    if (telescopeParked == false)
+    if (telescopeParked == false) // if not parked
     {
       blockDome = true;
     }
@@ -143,7 +143,7 @@ bool getTelescopeAlpacaParkedState()
 bool getTelescopeDirectParkedState()
 {
   // TCP/IP connection to the telescope
-  String response = simpleNetcat(telescopeDirectIP, telescopeDirectPort, ":Gstat#", 500);
+  String response = simpleNetcat(telescopeDirectIP, telescopeDirectPort, ":Gstat#", true);
 
   // Parse the response
   // Returns: a number depending on the current status of the mount, terminated by a '#',
@@ -217,7 +217,7 @@ void closeObservatory()
 void parkTelescope()
 {
   // Park the telescope
-  String response = simpleNetcat(telescopeDirectIP, telescopeDirectPort, ":KA#", 500);
+  simpleNetcat(telescopeDirectIP, telescopeDirectPort, ":KA#", false);
 
   // Check if the telescope is parked in while loop, timeout after 180 seconds
   unsigned long startTime = millis();
@@ -257,14 +257,14 @@ void abortDomeMovement()
 void abortTelescopeMovement()
 {
   // Abort the telescope movement
-  String response = simpleNetcat(telescopeDirectIP, telescopeDirectPort, ":STOP#", 500);
+  simpleNetcat(telescopeDirectIP, telescopeDirectPort, ":STOP#", false);
 }
 
 // Function to forward a request to the target device
 void forwardRequest(Request &req, Response &res)
 {
   // Extract path and method
-  const char *path = req.path();
+  char *path = req.path();
 
   // Get HTTP method as string
   const char *methodStr;
@@ -289,7 +289,7 @@ void forwardRequest(Request &req, Response &res)
         (methodStr == "PUT"))
     {
       res.status(403); // Forbidden
-      res.print("{\"error\":\"Device is currently in use\"}");
+      res.print("{\"error\":\"Device PUTs not allowed.\"}");
       return;
     }
   }
@@ -321,6 +321,11 @@ void forwardRequest(Request &req, Response &res)
 
   // Read the request body
   String requestBuffer = req.readString();
+  String query = req.query();
+
+  // add query to path
+  path = strcat(path, "?");
+  path = strcat(path, query.c_str());
 
   String body = sendRequest(methodStr, path, requestBuffer, targetIP, targetPort);
 
@@ -361,7 +366,7 @@ String sendRequest(const char *methodStr, const char *path, String requestBuffer
   EthernetClient ethClient;
 
   // Set timeout for the client operations
-  ethClient.setTimeout(FUNCTION_TIMEOUT); // FUNCTION_TIMEOUT seconds timeout for read operations
+  ethClient.setSocketTimeout(FUNCTION_TIMEOUT); // FUNCTION_TIMEOUT seconds timeout for read operations
 
   // Attempt to connect to the target server
   bool connectSuccess = false;
@@ -376,7 +381,7 @@ String sendRequest(const char *methodStr, const char *path, String requestBuffer
     // Check overall function timeout
     if (millis() - functionStartTime > FUNCTION_TIMEOUT)
     {
-      debugPrint("Function execution timeout during connection");
+      Serial.println("Function execution timeout during connection");
       break;
     }
 
@@ -438,7 +443,7 @@ String sendRequest(const char *methodStr, const char *path, String requestBuffer
   }
   else
   {
-    debugPrint("Connection to target server failed");
+    Serial.println("Connection to target server failed");
     requestHappening = false;
     ethClient.stop();
     // res.status(502); // Bad Gateway
@@ -455,7 +460,7 @@ String sendRequest(const char *methodStr, const char *path, String requestBuffer
     // Check response timeout
     if (millis() - functionStartTime > FUNCTION_TIMEOUT)
     {
-      debugPrint("Response read timeout");
+      Serial.println("Response read timeout");
       break;
     }
 
@@ -490,7 +495,7 @@ String sendRequest(const char *methodStr, const char *path, String requestBuffer
 }
 
 // Function to send data to a server and receive response
-String simpleNetcat(IPAddress host, int port, String content, int sleep_ms)
+String simpleNetcat(IPAddress host, int port, String content, bool expectResponse)
 {
 
   // Overall function timeout
@@ -500,7 +505,7 @@ String simpleNetcat(IPAddress host, int port, String content, int sleep_ms)
   EthernetClient netCatClient;
 
   // Set timeout for client operations
-  netCatClient.setTimeout(FUNCTION_TIMEOUT); // FUNCTION_TIMEOUT seconds timeout for read operations
+  netCatClient.setSocketTimeout(FUNCTION_TIMEOUT); // FUNCTION_TIMEOUT seconds timeout for read operations
 
   // Attempt to connect to the target server
   bool connectSuccess = false;
@@ -515,7 +520,7 @@ String simpleNetcat(IPAddress host, int port, String content, int sleep_ms)
     // Check overall function timeout
     if (millis() - functionStartTime > FUNCTION_TIMEOUT)
     {
-      debugPrint("Function execution timeout during connection");
+      Serial.println("Function execution timeout during connection");
       break;
     }
 
@@ -530,17 +535,17 @@ String simpleNetcat(IPAddress host, int port, String content, int sleep_ms)
   }
   else
   {
-    debugPrint("Connection to target server failed");
+    Serial.println("Connection to target server failed");
     netCatClient.stop();
     return "";
   }
 
-  while (netCatClient.connected())
+  while (netCatClient.connected() && expectResponse)
   {
     // Check response timeout
     if (millis() - functionStartTime > FUNCTION_TIMEOUT)
     {
-      debugPrint("Response read timeout");
+      Serial.println("Response read timeout");
       break;
     }
 
@@ -548,6 +553,11 @@ String simpleNetcat(IPAddress host, int port, String content, int sleep_ms)
     {
       char c = netCatClient.read();
       response += c;
+    }
+
+    if (response.endsWith("#"))
+    {
+      break;
     }
   }
 
