@@ -30,15 +30,21 @@ volatile bool blockTelescope = false;
 bool requestHappening = false;
 const unsigned long FUNCTION_TIMEOUT = 60000; // 60 seconds total timeout
 
+#define MAX_CLIENTS 20
+EthernetClient clients[MAX_CLIENTS];
+unsigned long clientConnectTime[MAX_CLIENTS];
+
 // Thread for reading states
 static rtos::Thread ReadStatesThread;
+static rtos::Thread acceptThread;
+static rtos::Thread handleThread;
 
 // Initialize the Ethernet server and aWOT application
 EthernetServer server(80);
 Application app;
 
 // Debug flag - set to true for Serial debugging
-const bool DEBUG = true;
+const bool DEBUG = false;
 
 void debugPrint(const char *message)
 {
@@ -100,9 +106,9 @@ void readStates()
             closeObservatory();
         }
 
-        rtos::ThisThread::sleep_for(2500);
+        rtos::ThisThread::sleep_for(100);
         digitalWrite(LED_BUILTIN, LOW);
-        rtos::ThisThread::sleep_for(2500);
+        rtos::ThisThread::sleep_for(4900);
     }
 }
 
@@ -343,7 +349,7 @@ String sendRequest(const char *methodStr, const char *path, String requestBuffer
 
     if (requestHappening)
     {
-        debugPrint("Request already happening");
+        Serial.println("Request already happening");
 
         while (requestHappening)
         {
@@ -574,9 +580,9 @@ String simpleNetcat(IPAddress host, int port, String content, bool expectRespons
 
 void setup()
 {
+    Serial.begin(9600);
     if (DEBUG)
     {
-        Serial.begin(9600);
         while (!Serial)
         {
             ; // Wait for serial port to connect
@@ -600,18 +606,62 @@ void setup()
 
     // Start the server
     server.begin();
+
+    // start acceptThread thread
+    acceptThread.start(acceptClients);
+
+    // start handleThread thread
+    handleThread.start(handleClients);
+
     debugPrint("Proxy server ready!");
+}
+
+void acceptClients()
+{
+    while (true)
+    {
+        EthernetClient newClient = server.available();
+        if (newClient)
+        {
+            for (int i = 0; i < MAX_CLIENTS; i++)
+            {
+                if (!clients[i])
+                {
+                    clients[i] = newClient;
+                    clientConnectTime[i] = millis();
+                    break;
+                }
+            }
+        }
+        rtos::ThisThread::sleep_for(5); // give other threads a chance to run
+    }
+}
+
+void handleClients()
+{
+    while (true)
+    {
+        for (int i = 0; i < MAX_CLIENTS; i++)
+        {
+            if (clients[i] && clients[i].connected())
+            {
+                if (clients[i].available())
+                {
+                    app.process(&clients[i]);
+                    clients[i].flush();
+                    clients[i].stop();
+                }
+            }
+            else if (clients[i])
+            {
+                clients[i].stop();
+            }
+        }
+        rtos::ThisThread::sleep_for(5); // give other threads a chance to run
+    }
 }
 
 void loop()
 {
-    // Handle incoming client connections
-    EthernetClient client = server.available();
-
-    if (client.connected())
-    {
-        debugPrint("Client connected");
-        app.process(&client);
-        client.stop();
-    }
+    delay(1000);
 }
