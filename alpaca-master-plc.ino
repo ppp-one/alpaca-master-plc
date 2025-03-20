@@ -42,576 +42,576 @@ const bool DEBUG = true;
 
 void debugPrint(const char *message)
 {
-  if (DEBUG)
-  {
-    Serial.println(message);
-  }
+    if (DEBUG)
+    {
+        Serial.println(message);
+    }
 }
 
 void debugPrint(const char *message, auto value)
 {
-  if (DEBUG)
-  {
-    Serial.print(message);
-    Serial.println(value);
-  }
+    if (DEBUG)
+    {
+        Serial.print(message);
+        Serial.println(value);
+    }
 }
 
 // Read all states
 void readStates()
 {
-  while (true)
-  {
-    // TODO: wrap in try catch
-
-    digitalWrite(LED_BUILTIN, HIGH);
-
-    // checks
-    bool safetyMonitorState = getSafetyMonitorState();
-    int domeShutterState = getDomeShutterState();
-    bool telescopeParked = getTelescopeDirectParkedState();
-
-    debugPrint("Safety monitor state: ", safetyMonitorState);
-    debugPrint("Dome shutter state: ", domeShutterState);
-    debugPrint("Telescope parked state: ", telescopeParked);
-
-    if (domeShutterState != 0) // if not open
+    while (true)
     {
-      blockTelescope = true;
-    }
-    else
-    {
-      blockTelescope = false;
-    }
+        // TODO: wrap in try catch
 
-    if (telescopeParked == false) // if not parked
-    {
-      blockDome = true;
-    }
-    else
-    {
-      blockDome = false;
-    }
+        digitalWrite(LED_BUILTIN, HIGH);
 
-    if (safetyMonitorState == false)
-    {
-      blockDome = true;
-      blockTelescope = true;
-      closeObservatory();
-    }
+        // checks
+        bool safetyMonitorState = getSafetyMonitorState();
+        int domeShutterState = getDomeShutterState();
+        bool telescopeParked = getTelescopeDirectParkedState();
 
-    rtos::ThisThread::sleep_for(2500);
-    digitalWrite(LED_BUILTIN, LOW);
-    rtos::ThisThread::sleep_for(2500);
-  }
+        debugPrint("Safety monitor state: ", safetyMonitorState);
+        debugPrint("Dome shutter state: ", domeShutterState);
+        debugPrint("Telescope parked state: ", telescopeParked);
+
+        if (domeShutterState != 0) // if not open
+        {
+            blockTelescope = true;
+        }
+        else
+        {
+            blockTelescope = false;
+        }
+
+        if (telescopeParked == false) // if not parked
+        {
+            blockDome = true;
+        }
+        else
+        {
+            blockDome = false;
+        }
+
+        if (safetyMonitorState == false)
+        {
+            blockDome = true;
+            blockTelescope = true;
+            closeObservatory();
+        }
+
+        rtos::ThisThread::sleep_for(2500);
+        digitalWrite(LED_BUILTIN, LOW);
+        rtos::ThisThread::sleep_for(2500);
+    }
 }
 
 int getDomeShutterState()
 {
 
-  // shutterOpen = 0
-  // shutterClosed = 1
-  // shutterOpening = 2
-  // shutterClosing = 3
-  // shutterError = 4
+    // shutterOpen = 0
+    // shutterClosed = 1
+    // shutterOpening = 2
+    // shutterClosing = 3
+    // shutterError = 4
 
-  String payload = sendRequest("GET", "/api/v1/dome/0/shutterstatus", "", domeAlpacaIP, domeAlpacaPort);
+    String payload = sendRequest("GET", "/api/v1/dome/0/shutterstatus", "", domeAlpacaIP, domeAlpacaPort);
 
-  DynamicJsonDocument doc(1024); // Heap-allocated for variable sizes
+    DynamicJsonDocument doc(1024); // Heap-allocated for variable sizes
 
-  if (deserializeJson(doc, payload.c_str()) != DeserializationError::Ok)
-  {
-    debugPrint("Parsing failed for getDomeShutterState");
-    return 4;
-  }
+    if (deserializeJson(doc, payload.c_str()) != DeserializationError::Ok)
+    {
+        debugPrint("Parsing failed for getDomeShutterState");
+        return 4;
+    }
 
-  return doc["Value"];
+    return doc["Value"];
 }
 
 bool getTelescopeAlpacaParkedState()
 {
-  String payload = sendRequest("GET", "/api/v1/telescope/0/atpark", "", telescopeAlpacaIP, telescopeAlpacaPort);
+    String payload = sendRequest("GET", "/api/v1/telescope/0/atpark", "", telescopeAlpacaIP, telescopeAlpacaPort);
 
-  DynamicJsonDocument doc(1024); // Heap-allocated for variable sizes
+    DynamicJsonDocument doc(1024); // Heap-allocated for variable sizes
 
-  if (deserializeJson(doc, payload.c_str()) != DeserializationError::Ok)
-  {
-    debugPrint("Parsing failed for getTelescopeAlpacaParkedState");
-    return false;
-  }
+    if (deserializeJson(doc, payload.c_str()) != DeserializationError::Ok)
+    {
+        debugPrint("Parsing failed for getTelescopeAlpacaParkedState");
+        return false;
+    }
 
-  return doc["Value"];
+    return doc["Value"];
 }
 
 bool getTelescopeDirectParkedState()
 {
-  // TCP/IP connection to the telescope
-  String response = simpleNetcat(telescopeDirectIP, telescopeDirectPort, ":Gstat#", true);
+    // TCP/IP connection to the telescope
+    String response = simpleNetcat(telescopeDirectIP, telescopeDirectPort, ":Gstat#", true);
 
-  // Parse the response
-  // Returns: a number depending on the current status of the mount, terminated by a '#',
-  // with the following meaning:
-  // 0# The mount is tracking.
-  // 1# The mount is stopped after the pressing of the STOP key,
-  // receiving the :STOP# command or completing an homing
-  // sequence. Note that up to firmware version 2.12.21 included, the
-  // status will be returned as 1# just after the STOP key is pressed or
-  // the :STOP# command is received, even if the mount hasn't
-  // stopped yet. Since firmware version 2.12.22, this status will be
-  // returned only if the motors are actually stopped.
-  // 2# The mount is slewing to the park position.
-  // 3# The mount is unparking.
-  // 4# The mount is slewing to the home position.
-  // 5# The mount is parked.
-  // 6# The mount is slewing, or the mount is going to stop (but still
-  // moving) after the STOP key has been pressed or the :STOP#
-  // command has been received.
-  // 7# Tracking is off and the mount is not moving.
-  // 8# The motors are inhibited because of low temperature (only for
-  // special-purpose mounts with temperature sensors) , or the motors
-  // are subject to pre-heating before startup.
-  // 9# Tracking is on but the mount is outside tracking limits.
-  // 10# The mount is following a precalulated satellite trajectory.
-  // 11# The mount needs an user intervention to authorize movement, due
-  // to a suspected inconsistency in data (see :USEROK# command);
-  // if this occurs, DO NOT assume anything about the correctness of
-  // the mount position or alignment data.
-  // 98# Unknown status.
-  // 99# Error.
+    // Parse the response
+    // Returns: a number depending on the current status of the mount, terminated by a '#',
+    // with the following meaning:
+    // 0# The mount is tracking.
+    // 1# The mount is stopped after the pressing of the STOP key,
+    // receiving the :STOP# command or completing an homing
+    // sequence. Note that up to firmware version 2.12.21 included, the
+    // status will be returned as 1# just after the STOP key is pressed or
+    // the :STOP# command is received, even if the mount hasn't
+    // stopped yet. Since firmware version 2.12.22, this status will be
+    // returned only if the motors are actually stopped.
+    // 2# The mount is slewing to the park position.
+    // 3# The mount is unparking.
+    // 4# The mount is slewing to the home position.
+    // 5# The mount is parked.
+    // 6# The mount is slewing, or the mount is going to stop (but still
+    // moving) after the STOP key has been pressed or the :STOP#
+    // command has been received.
+    // 7# Tracking is off and the mount is not moving.
+    // 8# The motors are inhibited because of low temperature (only for
+    // special-purpose mounts with temperature sensors) , or the motors
+    // are subject to pre-heating before startup.
+    // 9# Tracking is on but the mount is outside tracking limits.
+    // 10# The mount is following a precalulated satellite trajectory.
+    // 11# The mount needs an user intervention to authorize movement, due
+    // to a suspected inconsistency in data (see :USEROK# command);
+    // if this occurs, DO NOT assume anything about the correctness of
+    // the mount position or alignment data.
+    // 98# Unknown status.
+    // 99# Error.
 
-  // Extract the status
-  int status = response.substring(0, response.indexOf("#")).toInt();
+    // Extract the status
+    int status = response.substring(0, response.indexOf("#")).toInt();
 
-  // Check if the mount is parked
-  return status == 5;
+    // Check if the mount is parked
+    return status == 5;
 }
 
 bool getSafetyMonitorState()
 {
-  String payload = sendRequest("GET", "/api/v1/safetymonitor/0/issafe", "", safetyMonitorAlpacaIP, safetyMonitorAlpacaPort);
+    String payload = sendRequest("GET", "/api/v1/safetymonitor/0/issafe", "", safetyMonitorAlpacaIP, safetyMonitorAlpacaPort);
 
-  DynamicJsonDocument doc(1024); // Heap-allocated for variable sizes
+    DynamicJsonDocument doc(1024); // Heap-allocated for variable sizes
 
-  if (deserializeJson(doc, payload.c_str()) != DeserializationError::Ok)
-  {
-    debugPrint("Parsing failed for getSafetyMonitorState");
-    return false;
-  }
+    if (deserializeJson(doc, payload.c_str()) != DeserializationError::Ok)
+    {
+        debugPrint("Parsing failed for getSafetyMonitorState");
+        return false;
+    }
 
-  return doc["Value"];
+    return doc["Value"];
 }
 
 void closeObservatory()
 {
-  // Park the telescope if it is not already parked
-  if (getTelescopeDirectParkedState() == false)
-  {
-    abortTelescopeMovement();
-    parkTelescope();
-  }
+    // Park the telescope if it is not already parked
+    if (getTelescopeDirectParkedState() == false)
+    {
+        abortTelescopeMovement();
+        parkTelescope();
+    }
 
-  if (getTelescopeDirectParkedState() == true && getDomeShutterState() != 1)
-  {
-    // Close the dome
-    closeDome();
-  }
+    if (getTelescopeDirectParkedState() == true && getDomeShutterState() != 1)
+    {
+        // Close the dome
+        closeDome();
+    }
 }
 
 void parkTelescope()
 {
-  // Park the telescope
-  simpleNetcat(telescopeDirectIP, telescopeDirectPort, ":KA#", false);
+    // Park the telescope
+    simpleNetcat(telescopeDirectIP, telescopeDirectPort, ":KA#", false);
 
-  // Check if the telescope is parked in while loop, timeout after 180 seconds
-  unsigned long startTime = millis();
-  while (getTelescopeDirectParkedState() == false)
-  {
-    if (millis() - startTime > 180000)
+    // Check if the telescope is parked in while loop, timeout after 180 seconds
+    unsigned long startTime = millis();
+    while (getTelescopeDirectParkedState() == false)
     {
-      break;
+        if (millis() - startTime > 180000)
+        {
+            break;
+        }
+        rtos::ThisThread::sleep_for(1000);
     }
-    rtos::ThisThread::sleep_for(1000);
-  }
 }
 
 void closeDome()
 {
-  // Close the dome
-  String payload = sendRequest("PUT", "/api/v1/dome/0/closeshutter", "", domeAlpacaIP, domeAlpacaPort);
+    // Close the dome
+    String payload = sendRequest("PUT", "/api/v1/dome/0/closeshutter", "", domeAlpacaIP, domeAlpacaPort);
 
-  // Check if the dome is closed in while loop, timeout after 180 seconds
-  unsigned long startTime = millis();
-  while (getDomeShutterState() != 1)
-  {
-    if (millis() - startTime > 180000)
+    // Check if the dome is closed in while loop, timeout after 180 seconds
+    unsigned long startTime = millis();
+    while (getDomeShutterState() != 1)
     {
-      break;
+        if (millis() - startTime > 180000)
+        {
+            break;
+        }
+        rtos::ThisThread::sleep_for(1000);
     }
-    rtos::ThisThread::sleep_for(1000);
-  }
 }
 
 void abortDomeMovement()
 {
-  // Abort the dome movement
-  sendRequest("PUT", "/api/v1/dome/0/abortslew", "", domeAlpacaIP, domeAlpacaPort);
+    // Abort the dome movement
+    sendRequest("PUT", "/api/v1/dome/0/abortslew", "", domeAlpacaIP, domeAlpacaPort);
 }
 
 void abortTelescopeMovement()
 {
-  // Abort the telescope movement
-  simpleNetcat(telescopeDirectIP, telescopeDirectPort, ":STOP#", false);
+    // Abort the telescope movement
+    simpleNetcat(telescopeDirectIP, telescopeDirectPort, ":STOP#", false);
 }
 
 // Function to forward a request to the target device
 void forwardRequest(Request &req, Response &res)
 {
-  // Extract path and method
-  char *path = req.path();
+    // Extract path and method
+    char *path = req.path();
 
-  // Get HTTP method as string
-  const char *methodStr;
-  switch (req.method())
-  {
-  case Request::GET:
-    methodStr = "GET";
-    break;
-  case Request::PUT:
-    methodStr = "PUT";
-    break;
-  default:
-    methodStr = "GET";
-  }
-
-  res.set("Content-Type", "application/json");
-
-  if (strstr(path, "connected") == NULL)
-  {
-    if (((blockDome && strstr(path, "dome") != NULL) ||
-         (blockTelescope && strstr(path, "telescope") != NULL)) &&
-        (methodStr == "PUT"))
+    // Get HTTP method as string
+    const char *methodStr;
+    switch (req.method())
     {
-      res.status(403); // Forbidden
-      res.print("{\"error\":\"Device PUTs not allowed.\"}");
-      return;
+    case Request::GET:
+        methodStr = "GET";
+        break;
+    case Request::PUT:
+        methodStr = "PUT";
+        break;
+    default:
+        methodStr = "GET";
     }
-  }
 
-  IPAddress targetIP;
-  int targetPort;
+    res.set("Content-Type", "application/json");
 
-  if (strstr(path, "dome") != NULL)
-  {
-    targetIP = domeAlpacaIP;
-    targetPort = domeAlpacaPort;
-  }
-  else if (strstr(path, "telescope") != NULL)
-  {
-    targetIP = telescopeAlpacaIP;
-    targetPort = telescopeAlpacaPort;
-  }
-  else if (strstr(path, "safetymonitor") != NULL)
-  {
-    targetIP = safetyMonitorAlpacaIP;
-    targetPort = safetyMonitorAlpacaPort;
-  }
-  else
-  {
-    res.status(404); // Not Found
-    res.print("{\"error\":\"Device not found\"}");
-    return;
-  }
+    if (strstr(path, "connected") == NULL)
+    {
+        if (((blockDome && strstr(path, "dome") != NULL) ||
+             (blockTelescope && strstr(path, "telescope") != NULL)) &&
+            (methodStr == "PUT"))
+        {
+            res.status(403); // Forbidden
+            res.print("{\"error\":\"Device PUTs not allowed.\"}");
+            return;
+        }
+    }
 
-  // Read the request body
-  String requestBuffer = req.readString();
-  String query = req.query();
+    IPAddress targetIP;
+    int targetPort;
 
-  // add query to path
-  path = strcat(path, "?");
-  path = strcat(path, query.c_str());
+    if (strstr(path, "dome") != NULL)
+    {
+        targetIP = domeAlpacaIP;
+        targetPort = domeAlpacaPort;
+    }
+    else if (strstr(path, "telescope") != NULL)
+    {
+        targetIP = telescopeAlpacaIP;
+        targetPort = telescopeAlpacaPort;
+    }
+    else if (strstr(path, "safetymonitor") != NULL)
+    {
+        targetIP = safetyMonitorAlpacaIP;
+        targetPort = safetyMonitorAlpacaPort;
+    }
+    else
+    {
+        res.status(404); // Not Found
+        res.print("{\"error\":\"Device not found\"}");
+        return;
+    }
 
-  String body = sendRequest(methodStr, path, requestBuffer, targetIP, targetPort);
+    // Read the request body
+    String requestBuffer = req.readString();
+    String query = req.query();
 
-  res.print(body.c_str());
+    // add query to path
+    path = strcat(path, "?");
+    path = strcat(path, query.c_str());
+
+    String body = sendRequest(methodStr, path, requestBuffer, targetIP, targetPort);
+
+    res.print(body.c_str());
 }
 
 // Function to forward a request to a server and receive a response
 String sendRequest(const char *methodStr, const char *path, String requestBuffer, IPAddress targetServerIP, int targetServerPort)
 {
-  // Overall function timeout
-  unsigned long functionStartTime = millis();
+    // Overall function timeout
+    unsigned long functionStartTime = millis();
 
-  if (requestHappening)
-  {
-    debugPrint("Request already happening");
-
-    while (requestHappening)
+    if (requestHappening)
     {
-      if (millis() - functionStartTime > FUNCTION_TIMEOUT)
-      {
-        debugPrint("Timed out waiting for previous request");
-        return ""; // Or return an error message
-      }
+        debugPrint("Request already happening");
 
-      rtos::ThisThread::sleep_for(100);
-    }
-  }
-  else
-  {
-    requestHappening = true;
-  }
+        while (requestHappening)
+        {
+            if (millis() - functionStartTime > FUNCTION_TIMEOUT)
+            {
+                debugPrint("Timed out waiting for previous request");
+                return ""; // Or return an error message
+            }
 
-  debugPrint("Request method: ", methodStr);
-  debugPrint("Request path: ", path);
-  debugPrint("Request body: ", requestBuffer.c_str());
-
-  // Create Ethernet client
-  EthernetClient ethClient;
-
-  // Set timeout for the client operations
-  ethClient.setSocketTimeout(FUNCTION_TIMEOUT); // FUNCTION_TIMEOUT seconds timeout for read operations
-
-  // Attempt to connect to the target server
-  bool connectSuccess = false;
-  while (!connectSuccess)
-  {
-    if (ethClient.connect(targetServerIP, targetServerPort))
-    {
-      connectSuccess = true;
-      break;
-    }
-
-    // Check overall function timeout
-    if (millis() - functionStartTime > FUNCTION_TIMEOUT)
-    {
-      Serial.println("Function execution timeout during connection");
-      break;
-    }
-
-    rtos::ThisThread::sleep_for(100);
-  }
-
-  if (connectSuccess)
-  {
-    debugPrint("Connected to target server");
-
-    // Send the request line
-    ethClient.print(methodStr);
-    ethClient.print(" ");
-    ethClient.print(path);
-
-    // For GET requests, append parameters to the URL if they exist
-    if (methodStr == "GET" && requestBuffer.length() > 0)
-    {
-      ethClient.print("?");
-      ethClient.print(requestBuffer);
-    }
-
-    ethClient.println(" HTTP/1.0");
-
-    // Add required headers
-    ethClient.print("Host: ");
-    ethClient.print(targetServerIP[0]);
-    for (int i = 1; i < 4; i++)
-    {
-      ethClient.print(".");
-      ethClient.print(targetServerIP[i]);
-    }
-    ethClient.print(":");
-    ethClient.println(targetServerPort);
-
-    ethClient.println("Connection: close");
-
-    // Add Content-Length and Content-Type for PUT requests with body
-    if ((methodStr == "PUT") &&
-        requestBuffer.length() > 0)
-    {
-      ethClient.print("Content-Length: ");
-      ethClient.println(requestBuffer.length());
-      ethClient.println("Content-Type: application/x-www-form-urlencoded");
-
-      // End headers with blank line
-      ethClient.println();
-
-      // Send the body
-      ethClient.print(requestBuffer);
+            rtos::ThisThread::sleep_for(100);
+        }
     }
     else
     {
-      // End headers with blank line
-      ethClient.println();
+        requestHappening = true;
     }
 
-    debugPrint("Request sent to target server");
-  }
-  else
-  {
-    Serial.println("Connection to target server failed");
-    requestHappening = false;
-    ethClient.stop();
-    // res.status(502); // Bad Gateway
-    // res.print("{\"error\":\"Unable to connect to target server\"}");
-    return "";
-  }
+    debugPrint("Request method: ", methodStr);
+    debugPrint("Request path: ", path);
+    debugPrint("Request body: ", requestBuffer.c_str());
 
-  String header = "";
-  String body = "";
-  bool isBody = false;
+    // Create Ethernet client
+    EthernetClient ethClient;
 
-  while (ethClient.connected())
-  {
-    // Check response timeout
-    if (millis() - functionStartTime > FUNCTION_TIMEOUT)
+    // Set timeout for the client operations
+    ethClient.setSocketTimeout(FUNCTION_TIMEOUT); // FUNCTION_TIMEOUT seconds timeout for read operations
+
+    // Attempt to connect to the target server
+    bool connectSuccess = false;
+    while (!connectSuccess)
     {
-      Serial.println("Response read timeout");
-      break;
-    }
-
-    if (ethClient.available())
-    {
-      char c = ethClient.read();
-
-      if (!isBody)
-      {
-        header += c;
-        if (header.endsWith("\r\n\r\n"))
+        if (ethClient.connect(targetServerIP, targetServerPort))
         {
-          isBody = true; // Switch to body parsing
+            connectSuccess = true;
+            break;
         }
-      }
-      else
-      {
-        body += c;
-      }
+
+        // Check overall function timeout
+        if (millis() - functionStartTime > FUNCTION_TIMEOUT)
+        {
+            Serial.println("Function execution timeout during connection");
+            break;
+        }
+
+        rtos::ThisThread::sleep_for(100);
     }
-  }
 
-  ethClient.stop();
+    if (connectSuccess)
+    {
+        debugPrint("Connected to target server");
 
-  // debugPrint("Header:", header);
-  debugPrint("Body:", body);
-  debugPrint(" ");
+        // Send the request line
+        ethClient.print(methodStr);
+        ethClient.print(" ");
+        ethClient.print(path);
 
-  requestHappening = false;
+        // For GET requests, append parameters to the URL if they exist
+        if (methodStr == "GET" && requestBuffer.length() > 0)
+        {
+            ethClient.print("?");
+            ethClient.print(requestBuffer);
+        }
 
-  return body;
+        ethClient.println(" HTTP/1.0");
+
+        // Add required headers
+        ethClient.print("Host: ");
+        ethClient.print(targetServerIP[0]);
+        for (int i = 1; i < 4; i++)
+        {
+            ethClient.print(".");
+            ethClient.print(targetServerIP[i]);
+        }
+        ethClient.print(":");
+        ethClient.println(targetServerPort);
+
+        ethClient.println("Connection: close");
+
+        // Add Content-Length and Content-Type for PUT requests with body
+        if ((methodStr == "PUT") &&
+            requestBuffer.length() > 0)
+        {
+            ethClient.print("Content-Length: ");
+            ethClient.println(requestBuffer.length());
+            ethClient.println("Content-Type: application/x-www-form-urlencoded");
+
+            // End headers with blank line
+            ethClient.println();
+
+            // Send the body
+            ethClient.print(requestBuffer);
+        }
+        else
+        {
+            // End headers with blank line
+            ethClient.println();
+        }
+
+        debugPrint("Request sent to target server");
+    }
+    else
+    {
+        Serial.println("Connection to target server failed");
+        requestHappening = false;
+        ethClient.stop();
+        // res.status(502); // Bad Gateway
+        // res.print("{\"error\":\"Unable to connect to target server\"}");
+        return "";
+    }
+
+    String header = "";
+    String body = "";
+    bool isBody = false;
+
+    while (ethClient.connected())
+    {
+        // Check response timeout
+        if (millis() - functionStartTime > FUNCTION_TIMEOUT)
+        {
+            Serial.println("Response read timeout");
+            break;
+        }
+
+        if (ethClient.available())
+        {
+            char c = ethClient.read();
+
+            if (!isBody)
+            {
+                header += c;
+                if (header.endsWith("\r\n\r\n"))
+                {
+                    isBody = true; // Switch to body parsing
+                }
+            }
+            else
+            {
+                body += c;
+            }
+        }
+    }
+
+    ethClient.stop();
+
+    // debugPrint("Header:", header);
+    debugPrint("Body:", body);
+    debugPrint(" ");
+
+    requestHappening = false;
+
+    return body;
 }
 
 // Function to send data to a server and receive response
 String simpleNetcat(IPAddress host, int port, String content, bool expectResponse)
 {
 
-  // Overall function timeout
-  unsigned long functionStartTime = millis();
+    // Overall function timeout
+    unsigned long functionStartTime = millis();
 
-  String response = "";
-  EthernetClient netCatClient;
+    String response = "";
+    EthernetClient netCatClient;
 
-  // Set timeout for client operations
-  netCatClient.setSocketTimeout(FUNCTION_TIMEOUT); // FUNCTION_TIMEOUT seconds timeout for read operations
+    // Set timeout for client operations
+    netCatClient.setSocketTimeout(FUNCTION_TIMEOUT); // FUNCTION_TIMEOUT seconds timeout for read operations
 
-  // Attempt to connect to the target server
-  bool connectSuccess = false;
-  while (!connectSuccess)
-  {
-    if (netCatClient.connect(host, port))
+    // Attempt to connect to the target server
+    bool connectSuccess = false;
+    while (!connectSuccess)
     {
-      connectSuccess = true;
-      break;
+        if (netCatClient.connect(host, port))
+        {
+            connectSuccess = true;
+            break;
+        }
+
+        // Check overall function timeout
+        if (millis() - functionStartTime > FUNCTION_TIMEOUT)
+        {
+            Serial.println("Function execution timeout during connection");
+            break;
+        }
+
+        rtos::ThisThread::sleep_for(100);
     }
 
-    // Check overall function timeout
-    if (millis() - functionStartTime > FUNCTION_TIMEOUT)
+    // Try to connect to the server
+    if (connectSuccess)
     {
-      Serial.println("Function execution timeout during connection");
-      break;
+        // Send the content
+        netCatClient.print(content);
+    }
+    else
+    {
+        Serial.println("Connection to target server failed");
+        netCatClient.stop();
+        return "";
     }
 
-    rtos::ThisThread::sleep_for(100);
-  }
+    while (netCatClient.connected() && expectResponse)
+    {
+        // Check response timeout
+        if (millis() - functionStartTime > FUNCTION_TIMEOUT)
+        {
+            Serial.println("Response read timeout");
+            break;
+        }
 
-  // Try to connect to the server
-  if (connectSuccess)
-  {
-    // Send the content
-    netCatClient.print(content);
-  }
-  else
-  {
-    Serial.println("Connection to target server failed");
+        if (netCatClient.available())
+        {
+            char c = netCatClient.read();
+            response += c;
+        }
+
+        if (response.endsWith("#"))
+        {
+            break;
+        }
+    }
+
+    // Close the connection
     netCatClient.stop();
-    return "";
-  }
 
-  while (netCatClient.connected() && expectResponse)
-  {
-    // Check response timeout
-    if (millis() - functionStartTime > FUNCTION_TIMEOUT)
-    {
-      Serial.println("Response read timeout");
-      break;
-    }
+    debugPrint("Response:", response);
 
-    if (netCatClient.available())
-    {
-      char c = netCatClient.read();
-      response += c;
-    }
-
-    if (response.endsWith("#"))
-    {
-      break;
-    }
-  }
-
-  // Close the connection
-  netCatClient.stop();
-
-  debugPrint("Response:", response);
-
-  return response;
+    return response;
 }
 
 void setup()
 {
-  if (DEBUG)
-  {
-    Serial.begin(9600);
-    while (!Serial)
+    if (DEBUG)
     {
-      ; // Wait for serial port to connect
+        Serial.begin(9600);
+        while (!Serial)
+        {
+            ; // Wait for serial port to connect
+        }
     }
-  }
 
-  // set pins for LEDs
-  pinMode(LED_BUILTIN, OUTPUT);
+    // set pins for LEDs
+    pinMode(LED_BUILTIN, OUTPUT);
 
-  // Initialize Ethernet connection
-  Ethernet.begin(mac, ip, dns, gateway, subnet);
-  ;
+    // Initialize Ethernet connection
+    Ethernet.begin(mac, ip, dns, gateway, subnet);
+    ;
 
-  debugPrint("Server started at ", Ethernet.localIP());
+    debugPrint("Server started at ", Ethernet.localIP());
 
-  // start ReadStatesThread thread
-  ReadStatesThread.start(readStates);
+    // start ReadStatesThread thread
+    ReadStatesThread.start(readStates);
 
-  // Set up aWOT routes
-  app.use(&forwardRequest);
+    // Set up aWOT routes
+    app.use(&forwardRequest);
 
-  // Start the server
-  server.begin();
-  debugPrint("Proxy server ready!");
+    // Start the server
+    server.begin();
+    debugPrint("Proxy server ready!");
 }
 
 void loop()
 {
-  // Handle incoming client connections
-  EthernetClient client = server.available();
+    // Handle incoming client connections
+    EthernetClient client = server.available();
 
-  if (client.connected())
-  {
-    debugPrint("Client connected");
-    app.process(&client);
-    client.stop();
-  }
+    if (client.connected())
+    {
+        debugPrint("Client connected");
+        app.process(&client);
+        client.stop();
+    }
 }

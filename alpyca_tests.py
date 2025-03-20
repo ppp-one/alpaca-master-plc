@@ -17,8 +17,8 @@ d = Dome(ip, 0)
 
 # print(c.Connected)
 # c.Connected = True
-# t.Connected = True
-# d.Connected = True
+t.Connected = True
+d.Connected = True
 # print(t.AtPark)
 # t.Park()
 # print(t.CanMoveAxis(TelescopeAxes.axisPrimary))
@@ -47,7 +47,7 @@ start_time = time.time()
 total = 10
 for i in range(total):
     print(d.ShutterStatus)
-    # print(t.SiderealTime)
+    print(t.SiderealTime)
     # print(c.CCDTemperature)
     r = requests.put(
         f"http://{ip}/api/v1/telescope/0/connected",

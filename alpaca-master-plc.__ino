@@ -1,0 +1,234 @@
+#include <Arduino.h>
+#include <rtos.h>
+#include <Ethernet.h>
+#include <aWOT.h>
+
+// Network configuration
+byte mac[] = {0xA8, 0x61, 0x0A, 0x50, 0x9D, 0x95};
+IPAddress ip(192, 168, 1, 10);
+EthernetServer server(80);
+
+// aWOT app instance
+Application app;
+
+// Mutex for thread safety
+rtos::Mutex dataMutex;
+
+// Sample data structure
+struct SensorData
+{
+    float temperature;
+    float humidity;
+    int light;
+    bool motion;
+    unsigned long lastUpdated;
+};
+
+// Global data instance
+SensorData sensorData = {22.5, 45.2, 780, false, 0};
+
+// Maximum concurrent connections
+#define MAX_CLIENTS 4
+
+// Client connection pool
+struct ClientConnection
+{
+    EthernetClient client;
+    bool active;
+    unsigned long lastActivity;
+    bool processing;
+};
+
+ClientConnection clientPool[MAX_CLIENTS];
+rtos::Mutex clientPoolMutex;
+
+// Thread for updating sensor data (simulated)
+void updateSensorDataThread()
+{
+    while (true)
+    {
+        dataMutex.lock();
+        // Simulate changing sensor data
+        sensorData.temperature = 20.0 + random(100) / 10.0;
+        sensorData.humidity = 40.0 + random(200) / 10.0;
+        sensorData.light = random(1000);
+        sensorData.motion = random(2) == 1;
+        sensorData.lastUpdated = millis();
+        dataMutex.unlock();
+
+        // Update every 5 seconds
+        rtos::ThisThread::sleep_for(5000);
+    }
+}
+
+// Thread for accepting new connections
+void connectionAcceptThread()
+{
+    // Initialize Ethernet
+    Ethernet.begin(mac, ip);
+    server.begin();
+
+    while (true)
+    {
+        // Try to get a new client
+        EthernetClient newClient = server.available();
+
+        if (newClient)
+        {
+            clientPoolMutex.lock();
+            // Find an empty slot in the pool
+            bool slotFound = false;
+            for (int i = 0; i < MAX_CLIENTS; i++)
+            {
+                if (!clientPool[i].active)
+                {
+                    clientPool[i].client = newClient;
+                    clientPool[i].active = true;
+                    clientPool[i].lastActivity = millis();
+                    clientPool[i].processing = false;
+                    slotFound = true;
+                    break;
+                }
+            }
+            clientPoolMutex.unlock();
+
+            if (!slotFound)
+            {
+                // No slots available, reject the connection
+                newClient.stop();
+            }
+        }
+
+        // Give other threads a chance to run
+        rtos::ThisThread::sleep_for(10);
+    }
+}
+
+// Thread for processing client requests
+void clientProcessingThread()
+{
+    while (true)
+    {
+        clientPoolMutex.lock();
+
+        // Process each active client
+        for (int i = 0; i < MAX_CLIENTS; i++)
+        {
+            if (clientPool[i].active)
+            {
+                EthernetClient &client = clientPool[i].client;
+
+                // Check for timeout
+                unsigned long currentTime = millis();
+                if (currentTime - clientPool[i].lastActivity > 3000)
+                { // 3 second timeout
+                    client.stop();
+                    clientPool[i].active = false;
+                    continue;
+                }
+
+                // Check if client has data and is not already being processed
+                if (client.available() && !clientPool[i].processing)
+                {
+                    clientPool[i].processing = true;
+                    clientPool[i].lastActivity = currentTime;
+
+                    // Release mutex while processing to allow other operations
+                    clientPoolMutex.unlock();
+
+                    // Process request
+                    app.process(&client);
+
+                    // Re-acquire mutex to update client status
+                    clientPoolMutex.lock();
+
+                    // Close connection after processing (HTTP 1.0 style)
+                    client.stop();
+                    clientPool[i].active = false;
+                }
+            }
+        }
+
+        clientPoolMutex.unlock();
+
+        // Give other threads a chance to run
+        rtos::ThisThread::sleep_for(10);
+    }
+}
+
+// API endpoint handler
+void sendJsonData(Request &req, Response &res)
+{
+    dataMutex.lock();
+
+    // Create JSON string
+    char jsonBuffer[160];
+    sprintf(jsonBuffer,
+            "{\"temperature\":%.1f,\"humidity\":%.1f,\"light\":%d,\"motion\":%s,\"timestamp\":%lu}",
+            sensorData.temperature,
+            sensorData.humidity,
+            sensorData.light,
+            sensorData.motion ? "true" : "false",
+            sensorData.lastUpdated);
+
+    dataMutex.unlock();
+
+    // Set content type and send response
+    res.set("Content-Type", "application/json");
+    res.set("Access-Control-Allow-Origin", "*");
+    res.print(jsonBuffer);
+}
+
+// Health check endpoint
+void healthCheck(Request &req, Response &res)
+{
+    res.set("Content-Type", "application/json");
+    res.print("{\"status\":\"ok\",\"connections\":");
+
+    clientPoolMutex.lock();
+    int activeConnections = 0;
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        if (clientPool[i].active)
+            activeConnections++;
+    }
+    clientPoolMutex.unlock();
+
+    char buffer[16];
+    sprintf(buffer, "%d}", activeConnections);
+    res.print(buffer);
+}
+
+// Setup function
+void setup()
+{
+    Serial.begin(115200);
+
+    // Initialize client pool
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        clientPool[i].active = false;
+    }
+
+    // Configure API routes
+    app.get("/api/data", &sendJsonData);
+    app.get("/health", &healthCheck);
+
+    // Create threads
+    // static rtos::Thread dataThread;
+    // dataThread.start(updateSensorDataThread);
+
+    static rtos::Thread acceptThread;
+    acceptThread.start(connectionAcceptThread);
+
+    static rtos::Thread processThread;
+    processThread.start(clientProcessingThread);
+
+    Serial.println("Concurrent webserver started");
+}
+
+void loop()
+{
+    // Main loop is empty as the work is done in threads
+    delay(1000);
+}
