@@ -725,7 +725,7 @@ void setup()
     debugPrint("Server started");
 
     // start the watchdog
-    mbed::Watchdog::get_instance().start(FUNCTION_TIMEOUT);
+    mbed::Watchdog::get_instance().start(20000); // 20 seconds timeout
 }
 
 void loop()
