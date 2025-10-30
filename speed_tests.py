@@ -1,6 +1,7 @@
-import time
-import requests
 import multiprocessing
+import time
+
+import requests
 
 remote = True
 if remote:
@@ -16,7 +17,7 @@ def make_requests(ip, _):
     for i in range(total):
         try:
             r = requests.get(
-                f"http://{ip}/fourB",
+                f"http://{ip}/api/v1/safetymonitor/0/issafe",
                 timeout=10,
             )
             # print(_, "status", r.text)
@@ -34,7 +35,7 @@ def make_requests(ip, _):
 
 if __name__ == "__main__":
     processes = []
-    n_clients = 4
+    n_clients = 1
     for _ in range(n_clients):
         p = multiprocessing.Process(
             target=make_requests,

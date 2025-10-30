@@ -2,6 +2,7 @@
 #include <aWOT.h>
 #include <ArduinoJson.h>
 #include "opta_info.h"
+#include <drivers/Watchdog.h>
 
 OptaBoardInfo *info;
 OptaBoardInfo *boardInfo();
@@ -214,6 +215,7 @@ void readStatesAndAct()
         rtos::ThisThread::sleep_for(100);
         digitalWrite(LED_BUILTIN, LOW);
         rtos::ThisThread::sleep_for(900);
+        mbed::Watchdog::get_instance().kick();
     }
 }
 
@@ -308,6 +310,7 @@ void parkTelescope()
             break;
         }
         rtos::ThisThread::sleep_for(1000);
+        mbed::Watchdog::get_instance().kick();
     }
 }
 
@@ -326,6 +329,7 @@ void closeDome()
             break;
         }
         rtos::ThisThread::sleep_for(1000);
+        mbed::Watchdog::get_instance().kick();
     }
 }
 
@@ -665,15 +669,7 @@ void endPoint(Request &req, Response &res)
 
 void setup()
 {
-    mbed::Watchdog::get_instance().start(DEVICE_TIMEOUT);
     Serial.begin(9600);
-    if (DEBUG)
-    {
-        while (!Serial)
-        {
-            ; // Wait for serial port to connect
-        }
-    }
 
     info = boardInfo();
     if (info->magic == 0xB5)
@@ -727,11 +723,13 @@ void setup()
     // begin the server
     server.begin();
     debugPrint("Server started");
+
+    // start the watchdog
+    mbed::Watchdog::get_instance().start(FUNCTION_TIMEOUT);
 }
 
 void loop()
 {
-    mbed::Watchdog::get_instance().kick();
     EthernetClient client = server.available();
 
     if (client.connected())
@@ -742,4 +740,4 @@ void loop()
 }
 
 // arduino-cli compile --fqbn arduino:mbed_opta:opta ./
-// arduino-cli upload -p /dev/cu.usbmodem1301 --fqbn arduino:mbed_opta:opta ./
+// arduino-cli upload -p /dev/cu.usbmodem2101 --fqbn arduino:mbed_opta:opta ./
