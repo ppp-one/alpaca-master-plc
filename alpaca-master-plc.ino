@@ -145,7 +145,7 @@ void safetyMonitorISR()
 {
     safetyMonitorState = digitalRead(safetyMonitorPin) == HIGH;
 
-    if (safetyMonitorState == true)
+    if (safetyMonitorState)
     {
         // LED on
         digitalWrite(SAFETY_SIGNAL_LED, HIGH);
@@ -187,16 +187,24 @@ void readStatesAndAct()
         }
 
         bool action = (!safetyMonitorState || (domeClosedSensor && !telescopeParked)) && errorFree;
-        // | **SM** | **Dome** | **Telescope** | **Action** |
-        // | ------ | -------- | ------------- | ---------- |
-        // | 1      | 1        | 1             | 0          |
-        // | 1      | 1        | 0             | 1          |
-        // | 1      | 0        | 1             | 0          |
-        // | 1      | 0        | 0             | 0          |
-        // | 0      | 1        | 1             | 1          |
-        // | 0      | 1        | 0             | 1          |
-        // | 0      | 0        | 1             | 1          |
-        // | 0      | 0        | 0             | 1          |
+        // | safetyMonitorState | domeClosedSensor | telescopeParked | errorFree | action |
+        // | ------------------ | ---------------- | --------------- | --------- | ------ |
+        // | 0                  | 0                | 0               | 0         | 0      |
+        // | 0                  | 0                | 1               | 0         | 0      |
+        // | 0                  | 1                | 0               | 0         | 0      |
+        // | 0                  | 1                | 1               | 0         | 0      |
+        // | 1                  | 0                | 0               | 0         | 0      |
+        // | 1                  | 0                | 1               | 0         | 0      |
+        // | 1                  | 1                | 0               | 0         | 0      |
+        // | 1                  | 1                | 1               | 0         | 0      |
+        // | 0                  | 0                | 0               | 1         | 1      |
+        // | 0                  | 0                | 1               | 1         | 1      |
+        // | 0                  | 1                | 0               | 1         | 1      |
+        // | 0                  | 1                | 1               | 1         | 1      |
+        // | 1                  | 0                | 0               | 1         | 0      |
+        // | 1                  | 0                | 1               | 1         | 0      |
+        // | 1                  | 1                | 0               | 1         | 1      |
+        // | 1                  | 1                | 1               | 1         | 0      |
 
         if (action)
         {
@@ -243,7 +251,9 @@ bool getTelescopeDirectParkedState()
     float altitude = split(response, ',', 4).toFloat();
 
     // altitude and azimuth must be with 2 degrees of 257.29757,+00.96283
-    bool isParked = (status == "5") && (altitude < 3) && (altitude > -1) && (azimuth < 259) && (azimuth > 255);
+    float parkAzimuth = 257.29757;
+    float parkAltitude = 0.96283;
+    bool isParked = (status == "5") && (altitude < (parkAltitude + 2)) && (altitude > (parkAltitude - 2)) && (azimuth < (parkAzimuth + 2)) && (azimuth > (parkAzimuth - 2));
 
     debugPrint("Telescope status: ", status);
     debugPrint("Telescope azimuth: ", azimuth);
@@ -260,12 +270,16 @@ void closeObservatory()
     {
         // Abort any current movements
         abortDomeMovement();
+        rtos::ThisThread::sleep_for(100);
+
         abortTelescopeMovement();
+        rtos::ThisThread::sleep_for(100);
 
         // Only park telescope if dome open
         if (domeOpenedSensor)
         {
             parkTelescope();
+            rtos::ThisThread::sleep_for(100);
         }
     }
 
@@ -282,6 +296,7 @@ void parkTelescope()
 {
     // Park the telescope
     simpleNetcat(telescopeDirectIP, telescopeDirectPort, ":KA#", false);
+    rtos::ThisThread::sleep_for(100);
 
     // Check if the telescope is parked in while loop, timeout after 180 seconds
     unsigned long startTime = millis();
@@ -343,7 +358,7 @@ String sendRequest(const char *methodStr, const char *path, String requestBuffer
         EthernetClient ethClient;
 
         // Set timeout for the client operations
-        ethClient.setSocketTimeout(FUNCTION_TIMEOUT); // FUNCTION_TIMEOUT seconds timeout for read operations
+        ethClient.setSocketTimeout(FUNCTION_TIMEOUT); // timeout for read operations
 
         // Attempt to connect to the target server
         bool connectSuccess = false;
@@ -594,7 +609,7 @@ void endPoint(Request &req, Response &res)
     }
     else if (url == "name")
     {
-        ValueString = "Safety monitor from Master PLC"; // TODO: change this, add limits?
+        ValueString = "Safety monitor from Master PLC";
     }
     else if (url == "driverversion")
     {
@@ -650,6 +665,7 @@ void endPoint(Request &req, Response &res)
 
 void setup()
 {
+    mbed::Watchdog::get_instance().start(DEVICE_TIMEOUT);
     Serial.begin(9600);
     if (DEBUG)
     {
@@ -715,6 +731,7 @@ void setup()
 
 void loop()
 {
+    mbed::Watchdog::get_instance().kick();
     EthernetClient client = server.available();
 
     if (client.connected())
