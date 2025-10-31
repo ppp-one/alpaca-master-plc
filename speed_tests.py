@@ -35,7 +35,7 @@ def make_requests(ip, _):
 
 if __name__ == "__main__":
     processes = []
-    n_clients = 1
+    n_clients = 7
     for _ in range(n_clients):
         p = multiprocessing.Process(
             target=make_requests,

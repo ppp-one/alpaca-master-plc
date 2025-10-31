@@ -1,8 +1,8 @@
 #include <Ethernet.h>
 #include <aWOT.h>
-#include <ArduinoJson.h>
 #include "opta_info.h"
 #include <drivers/Watchdog.h>
+#include <strings.h> // for strcasecmp
 
 OptaBoardInfo *info;
 OptaBoardInfo *boardInfo();
@@ -43,9 +43,9 @@ constexpr int OPENED_DOME_LED = LED_D1;
 constexpr int SAFETY_SIGNAL_LED = LED_D2;
 
 // isSafe
-bool isSafe = false;
-bool errorFree = true;
-bool running = true;
+volatile bool isSafe = false;
+volatile bool errorFree = true;
+volatile bool running = true;
 
 // Blocking flags
 const unsigned long FUNCTION_TIMEOUT = 10000; // 10 seconds total timeout
@@ -168,6 +168,16 @@ void readStatesAndAct()
             continue;
         }
 
+        // if not errorFree, blink and continue
+        if (!errorFree)
+        {
+            digitalWrite(LED_BUILTIN, LOW);
+            rtos::ThisThread::sleep_for(100);
+            digitalWrite(LED_BUILTIN, HIGH);
+            rtos::ThisThread::sleep_for(100);
+            continue;
+        }
+
         // TODO: wrap in try catch
 
         digitalWrite(LED_BUILTIN, HIGH);
@@ -225,6 +235,18 @@ bool getTelescopeDirectParkedState()
 {
     // TCP/IP connection to the telescope
     String response = simpleNetcat(telescopeDirectIP, telescopeDirectPort, ":Ginfo#", true);
+
+    if (response.length() == 0)
+    {
+        debugPrint("Telescope Ginfo empty response");
+        return false; // conservative default
+    }
+
+    // Trim trailing '#'
+    if (response.endsWith("#"))
+    {
+        response.remove(response.length() - 1);
+    }
 
     // #:Ginfo#
     // Get multiple information. Returns a string where multiple data are encoded, separated
@@ -394,8 +416,8 @@ String sendRequest(const char *methodStr, const char *path, String requestBuffer
             ethClient.print(" ");
             ethClient.print(path);
 
-            // For GET requests, append parameters to the URL if they exist
-            if (methodStr == "GET" && requestBuffer.length() > 0)
+                    // For GET requests, append parameters to the URL if they exist
+                    if (strcmp(methodStr, "GET") == 0 && requestBuffer.length() > 0)
             {
                 ethClient.print("?");
                 ethClient.print(requestBuffer);
@@ -417,7 +439,7 @@ String sendRequest(const char *methodStr, const char *path, String requestBuffer
             ethClient.println("Connection: close");
 
             // Add Content-Length and Content-Type for PUT requests with body
-            if ((methodStr == "PUT") &&
+            if ((strcmp(methodStr, "PUT") == 0) &&
                 requestBuffer.length() > 0)
             {
                 ethClient.print("Content-Length: ");
@@ -591,9 +613,11 @@ void endPoint(Request &req, Response &res)
     uint32_t ServerID = 0;            // TODO: what is this?
     uint32_t ServerTransactionID = 0; // TODO: what is this? increment?
 
-    float Value;
+    float Value = 0.0f;
     String ValueString;
-    bool ValueBool;
+    bool ValueBool = false;
+    bool hasString = false;
+    bool hasBool = false;
 
     char buffer[16]; // Adjust the buffer size as needed
 
@@ -610,18 +634,22 @@ void endPoint(Request &req, Response &res)
     if (url == "connected")
     {
         ValueBool = true;
+        hasBool = true;
     }
     else if (url == "name")
     {
         ValueString = "Safety monitor from Master PLC";
+        hasString = true;
     }
     else if (url == "driverversion")
     {
         ValueString = "0.0.2";
+        hasString = true;
     }
     else if (url == "issafe")
     {
         ValueBool = isSafe && errorFree;
+        hasBool = true;
     }
     else
     {
@@ -646,19 +674,19 @@ void endPoint(Request &req, Response &res)
     res.print(ErrorMessage);
     res.print(", ");
     res.print("\"Value\": ");
-    if (url == "name" || url == "driverversion")
+    if (hasString)
     {
         res.print("\"");
         res.print(ValueString);
         res.print("\"");
     }
-    else if (url == "issafe" || url == "connected")
+    else if (hasBool)
     {
         res.print(ValueBool ? "true" : "false");
     }
     else
     {
-        res.print(Value);
+        res.print("null");
     }
     res.print("}");
 
