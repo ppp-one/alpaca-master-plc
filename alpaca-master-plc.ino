@@ -158,8 +158,16 @@ void safetyMonitorISR()
 // Read all states
 void readStatesAndAct()
 {
-    while (running)
+    while (true)
     {
+        // If not running, idle briefly and continue so we can be resumed
+        if (!running)
+        {
+            digitalWrite(LED_BUILTIN, LOW);
+            rtos::ThisThread::sleep_for(500);
+            continue;
+        }
+
         // TODO: wrap in try catch
 
         digitalWrite(LED_BUILTIN, HIGH);
@@ -175,14 +183,14 @@ void readStatesAndAct()
         debugPrint("errorFree: ", errorFree);
 
         // if dome possibly stuck open and telescope not parked, abort all movements
-        if (!telescopeParked && !domeClosedSensor && !domeOpenedSensor)
+        if (!telescopeParked && !domeClosedSensor && !domeOpenedSensor && running)
         {
             abortDomeMovement();
             abortTelescopeMovement();
             errorFree = false;
         }
 
-        bool action = (!safetyMonitorState || (domeClosedSensor && !telescopeParked)) && errorFree;
+        bool action = (!safetyMonitorState || (domeClosedSensor && !telescopeParked)) && errorFree && running;
         // | safetyMonitorState | domeClosedSensor | telescopeParked | errorFree | action |
         // | ------------------ | ---------------- | --------------- | --------- | ------ |
         // | 0                  | 0                | 0               | 0         | 0      |
@@ -659,6 +667,141 @@ void endPoint(Request &req, Response &res)
     ErrorMessage = "\"\"";
 }
 
+// Simple API: get running state
+void hardlinkState(Request &req, Response &res)
+{
+        res.set("Content-Type", "application/json");
+        res.print("{");
+        res.print("\"running\": ");
+        res.print(running ? "true" : "false");
+        res.print("}");
+}
+
+// Simple API: toggle/set running state via form or query param `state` = on|off|toggle
+void hardlinkToggle(Request &req, Response &res)
+{
+        char stateBuf[16];
+        bool hasState = false;
+
+        // Try query string first
+        if (req.query("state", stateBuf, sizeof(stateBuf)))
+        {
+                hasState = true;
+        }
+
+        // If no query param, try reading form data
+        if (!hasState)
+        {
+                char name[32];
+                char value[32];
+                while (req.left())
+                {
+                        if (!req.form(name, sizeof(name), value, sizeof(value)))
+                        {
+                                break;
+                        }
+                        if (strcmp(name, "state") == 0)
+                        {
+                                strncpy(stateBuf, value, sizeof(stateBuf) - 1);
+                                stateBuf[sizeof(stateBuf) - 1] = '\0';
+                                hasState = true;
+                        }
+                }
+        }
+
+        if (hasState)
+        {
+                if (strcasecmp(stateBuf, "on") == 0 || strcmp(stateBuf, "1") == 0 || strcasecmp(stateBuf, "true") == 0)
+                {
+                        running = true;
+                }
+                else if (strcasecmp(stateBuf, "off") == 0 || strcmp(stateBuf, "0") == 0 || strcasecmp(stateBuf, "false") == 0)
+                {
+                        running = false;
+                }
+                else if (strcasecmp(stateBuf, "toggle") == 0)
+                {
+                        running = !running;
+                }
+                else
+                {
+                        res.sendStatus(400);
+                        return;
+                }
+        }
+        else
+        {
+                // No param provided, default to toggle
+                running = !running;
+        }
+
+        res.set("Content-Type", "application/json");
+        res.print("{");
+        res.print("\"ok\": true, \"running\": ");
+        res.print(running ? "true" : "false");
+        res.print("}");
+}
+
+// Simple UI page to toggle running state with confirmation
+void hardlinkPage(Request &req, Response &res)
+{
+        res.set("Content-Type", "text/html; charset=utf-8");
+
+        String stateText = running ? "On" : "Off";
+        String nextState = running ? "off" : "on";
+
+        String html = R"~(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hardlink control</title>
+    <style>
+        body { font-family: system-ui; margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; height: 100vh; background-color: #121212; color: #fff; }
+        .container { padding: 20px; border-radius: 8px; width: 320px; background-color: #1e1e1e; box-shadow: 0 0 10px rgba(0,0,0,0.3); }
+        h2 { margin-top: 0; font-size: large; font-weight: 500; color: #ccc; }
+        .state { margin: 12px 0 20px; font-size: 18px; }
+        .btn { display: inline-block; width: 100%; padding: 12px; border-radius: 6px; border: none; cursor: pointer; font-weight: 600; }
+        .on { background: #2ecc71; color: #000; }
+        .off { background: #e67e22; color: #000; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>Hardlink control</h2>
+        <div class="state">Current state: <strong>)~" + stateText + R"~(</strong></div>
+        <button id="toggleBtn" class="btn )~" + (running ? String("off") : String("on")) + R"~(">Turn )~" + (running ? String("Off") : String("On")) + R"~(</button>
+    </div>
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const nextState = ")~" + nextState + R"~(";
+            const btn = document.getElementById('toggleBtn');
+            if (!btn) return;
+            btn.addEventListener('click', async () => {
+                const ok = confirm(`Are you sure you want to turn the hardlink ${nextState}?`);
+                if (!ok) return;
+                try {
+                    const resp = await fetch('/api/hardlink/toggle', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: `state=${nextState}`
+                    });
+                    if (!resp.ok) throw new Error('Request failed');
+                    location.reload();
+                } catch (e) {
+                    alert('Failed to toggle: ' + e.message);
+                }
+            });
+        });
+    </script>
+</body>
+</html>
+)~";
+
+        res.print(html);
+}
+
 void setup()
 {
     Serial.begin(9600);
@@ -714,6 +857,11 @@ void setup()
     app.get("/api/v1/safetymonitor/0/issafe", &endPoint);
     app.get("/api/v1/safetymonitor/0/name", &endPoint);
     app.get("/api/v1/safetymonitor/0/driverversion", &endPoint);
+
+    // Simple hardlink control endpoints
+    app.get("/api/hardlink/state", &hardlinkState);
+    app.post("/api/hardlink/toggle", &hardlinkToggle);
+    app.get("/hardlink", &hardlinkPage);
 
     // start ReadStatesAndActThread thread
     ReadStatesAndActThread.start(readStatesAndAct);
