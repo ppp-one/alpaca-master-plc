@@ -911,8 +911,10 @@ void setup()
 {
     Serial.begin(9600);
 
-    // wait for terminal to come up
-    delay(1000);
+    // wait 5s for terminal to come up
+    // and for OCS to pick up stale safety state 
+    // if watchdog reset occurred
+    delay(5000);
 
     // start the watchdog
     mbed::Watchdog::get_instance().start(WATCHDOG_TIMEOUT);
