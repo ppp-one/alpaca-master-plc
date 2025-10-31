@@ -802,6 +802,83 @@ void hardlinkPage(Request &req, Response &res)
         res.print(html);
 }
 
+// API: get current errorFree state
+void errorFreeState(Request &req, Response &res)
+{
+    res.set("Content-Type", "application/json");
+    res.print("{");
+    res.print("\"errorFree\": ");
+    res.print(errorFree ? "true" : "false");
+    res.print("}");
+}
+
+// API: reset errorFree to true
+void errorFreeReset(Request &req, Response &res)
+{
+    errorFree = true;
+    res.set("Content-Type", "application/json");
+    res.print("{\"ok\": true, \"errorFree\": true}");
+}
+
+// Simple UI page to display error state and provide a reset button
+void errorFreePage(Request &req, Response &res)
+{
+        res.set("Content-Type", "text/html; charset=utf-8");
+
+        String stateText = errorFree ? "OK" : "Error";
+        String stateClass = errorFree ? "ok" : "err";
+
+        String html = R"~(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Error state</title>
+    <style>
+        body { font-family: system-ui; margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; height: 100vh; background-color: #121212; color: #fff; }
+        .container { padding: 20px; border-radius: 8px; width: 320px; background-color: #1e1e1e; box-shadow: 0 0 10px rgba(0,0,0,0.3); }
+        h2 { margin-top: 0; font-size: large; font-weight: 500; color: #ccc; }
+        .state { margin: 12px 0 20px; font-size: 18px; }
+        .state .ok { color: #2ecc71; }
+        .state .err { color: #e74c3c; }
+        .btn { display: inline-block; width: 100%; padding: 12px; border-radius: 6px; border: none; cursor: pointer; font-weight: 600; }
+        .reset { background: #93d4ff; color: #000; }
+        .links { margin-top: 14px; font-size: 14px; }
+        .links a { color: #93d4ff; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>Error state</h2>
+        <div class="state">Current: <strong class=")~" + stateClass + R"~(">)~" + stateText + R"~(</strong></div>
+        <button id="resetBtn" class="btn reset">Reset errors</button>
+        <div class="links"><a href="/hardlink">Go to hardlink control</a></div>
+    </div>
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const btn = document.getElementById('resetBtn');
+            if (!btn) return;
+            btn.addEventListener('click', async () => {
+                const ok = confirm('Are you sure you want to reset errors?');
+                if (!ok) return;
+                try {
+                    const resp = await fetch('/api/errorfree/reset', { method: 'POST' });
+                    if (!resp.ok) throw new Error('Request failed');
+                    location.reload();
+                } catch (e) {
+                    alert('Failed to reset: ' + e.message);
+                }
+            });
+        });
+    </script>
+</body>
+</html>
+)~";
+
+        res.print(html);
+}
+
 void setup()
 {
     Serial.begin(9600);
@@ -862,6 +939,11 @@ void setup()
     app.get("/api/hardlink/state", &hardlinkState);
     app.post("/api/hardlink/toggle", &hardlinkToggle);
     app.get("/hardlink", &hardlinkPage);
+
+    // Error state endpoints
+    app.get("/api/errorfree/state", &errorFreeState);
+    app.post("/api/errorfree/reset", &errorFreeReset);
+    app.get("/errorfree", &errorFreePage);
 
     // start ReadStatesAndActThread thread
     ReadStatesAndActThread.start(readStatesAndAct);
