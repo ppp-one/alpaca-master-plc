@@ -1,13 +1,13 @@
 # Alpaca Master PLC
 
-An Arduino Opta PLC safety controller for observatory automation that monitors conditions and automatically closes the observatory when unsafe conditions are detected.
+Custom Arduino Opta PLC safety controller for observatory automation that monitors conditions and automatically closes the observatory when unsafe conditions are detected.
 
 ## Purpose
 
 This PLC acts as a master safety controller that:
-- Monitors a safety sensor (weather conditions, etc.)
-- Tracks dome position via open/closed sensors
-- Checks telescope park status
+- Monitors a 24V safety monitor signal
+- Tracks dome position via open/closed sensors (rolling roof)
+- Checks telescope park status (10Micron mounts)
 - Automatically parks the telescope and closes the dome when conditions become unsafe
 - Exposes an ASCOM Alpaca safety monitor API
 
@@ -17,6 +17,7 @@ The PLC continuously monitors three inputs:
 1. **Safety Monitor Sensor** (A4): External safety signal (HIGH = safe, LOW = unsafe)
 2. **Dome Closed Sensor** (A2): Detects when dome is fully closed
 3. **Dome Opened Sensor** (A3): Detects when dome is fully open
+4. **Telescope Park Status**: Queried via direct TCP commands to the 10Micron telescope controller
 
 ### Safety Logic
 
@@ -35,7 +36,9 @@ The PLC communicates with:
 - **Telescope** (192.168.1.11:3490): Direct TCP commands for parking/status
 - **Dome** (192.168.1.14:80): ASCOM Alpaca API for shutter control
 
-The PLC itself hosts an ASCOM Alpaca safety monitor at `http://192.168.1.10/api/v1/safetymonitor/0/`
+The PLC itself hosts an ASCOM Alpaca safety monitor at `http://192.168.1.10/api/v1/safetymonitor/0/`.
+
+In addition, it provides a tiny web UI and simple control APIs (documented below) to pause/resume the automatic actions and to reset errors.
 
 ## Hardware Setup
 
@@ -44,17 +47,18 @@ The PLC itself hosts an ASCOM Alpaca safety monitor at `http://192.168.1.10/api/
 - Connect dome closed sensor to **A2** (HIGH when closed)
 - Connect dome opened sensor to **A3** (HIGH when open)
 - LEDs D0, D1, D2 indicate dome closed, dome opened, and safety status respectively
+- User LED flashes slowly under normal operation, fast when error encountered, or off when disabled
 
 ## Compilation & Upload
 
-Requires [arduino-cli](https://arduino.github.io/arduino-cli/) installed with the Arduino Mbed Opta core.
+Requires [arduino-cli](https://arduino.github.io/arduino-cli/) installed with the Arduino Mbed Opta core (custom core: https://github.com/ppp-one/ArduinoCore-mbed, or use the default Arduino Mbed core, however HTTP queries will be slower with the default core).
 
 ```bash
-# Compile the sketch
-arduino-cli compile --fqbn arduino:mbed_opta:opta ./
+# Compile (adjust FQBN to your installed core)
+arduino-cli compile --fqbn arduino-git:mbed:opta ./
 
 # Upload to Opta PLC (replace port as needed)
-arduino-cli upload -p /dev/cu.usbmodem1301 --fqbn arduino:mbed_opta:opta ./
+arduino-cli upload -p /dev/cu.usbmodem2101 --fqbn arduino-git:mbed:opta ./
 ```
 
 ## Configuration
@@ -64,14 +68,35 @@ Edit IP addresses in [alpaca-master-plc.ino](alpaca-master-plc.ino):
 - `telescopeDirectIP`: Your telescope controller IP
 - `domeAlpacaIP`: Your dome controller IP
 
-## API Endpoints
+## Web UI
 
-The PLC exposes these ASCOM Alpaca endpoints:
+- Hardlink automatic control: `http://192.168.1.10/hardlink`
+	- Shows current "Running" state and a button to toggle it
+	- Confirms: “Are you sure you want to turn the hardlink on/off?”
 
-- `GET /api/v1/safetymonitor/0/connected`: Check connection status
-- `GET /api/v1/safetymonitor/0/issafe`: Get safety status (considers both sensor and error state)
-- `GET /api/v1/safetymonitor/0/name`: Device name
-- `GET /api/v1/safetymonitor/0/driverversion`: Driver version
+- Error reset: `http://192.168.1.10/errorfree`
+	- Shows current error state (OK / Error) and a "Reset errors" button
+
+Notes
+- When Running is off, the background safety loop idles (no automatic actions) until re-enabled.
+
+## APIs
+
+ASCOM Alpaca (Safety Monitor):
+- `GET /api/v1/safetymonitor/0/connected` – connectivity check
+- `GET /api/v1/safetymonitor/0/issafe` – safety status (sensor AND error state)
+- `GET /api/v1/safetymonitor/0/name` – device name
+- `GET /api/v1/safetymonitor/0/driverversion` – driver version
+
+Simple control APIs:
+- Hardlink (Running)
+	- `GET /api/hardlink/state` → `{ "running": true|false }`
+	- `POST /api/hardlink/toggle` with `state=on|off|toggle` → `{ "ok": true, "running": ... }`
+
+- Error state (errorFree)
+	- `GET /api/errorfree/state` → `{ "errorFree": true|false }`
+	- `POST /api/errorfree/reset` → `{ "ok": true, "errorFree": true }`
+
 
 ## License
 
