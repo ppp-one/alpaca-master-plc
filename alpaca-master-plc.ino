@@ -9,13 +9,6 @@ OptaBoardInfo *boardInfo();
 
 using namespace mbed;
 
-// Network configuration for your Arduino
-// byte mac[] = {0xA8, 0x61, 0x0A, 0x50, 0x9D, 0x95};
-// IPAddress ip(192, 168, 1, 10);
-// IPAddress gateway(192, 168, 1, 1);
-// IPAddress subnet(255, 255, 255, 0);
-// IPAddress dns(8, 8, 8, 8);
-
 // the media access control (ethernet hardware) address
 byte mac[6];
 // the IP address
@@ -52,10 +45,12 @@ constexpr int SAFETY_SIGNAL_LED = LED_D2;
 // isSafe
 bool isSafe = false;
 bool errorFree = true;
+bool running = true;
 
 // Blocking flags
 const unsigned long FUNCTION_TIMEOUT = 10000; // 10 seconds total timeout
 const unsigned long DEVICE_TIMEOUT = 180000;  // 3 minutes total timeout
+const unsigned long WATCHDOG_TIMEOUT = 20000; // 20 seconds watchdog timeout
 
 // Thread for reading states
 static rtos::Thread ReadStatesAndActThread;
@@ -163,7 +158,7 @@ void safetyMonitorISR()
 // Read all states
 void readStatesAndAct()
 {
-    while (true)
+    while (running)
     {
         // TODO: wrap in try catch
 
@@ -215,7 +210,6 @@ void readStatesAndAct()
         rtos::ThisThread::sleep_for(100);
         digitalWrite(LED_BUILTIN, LOW);
         rtos::ThisThread::sleep_for(900);
-        mbed::Watchdog::get_instance().kick();
     }
 }
 
@@ -310,7 +304,6 @@ void parkTelescope()
             break;
         }
         rtos::ThisThread::sleep_for(1000);
-        mbed::Watchdog::get_instance().kick();
     }
 }
 
@@ -329,7 +322,6 @@ void closeDome()
             break;
         }
         rtos::ThisThread::sleep_for(1000);
-        mbed::Watchdog::get_instance().kick();
     }
 }
 
@@ -671,6 +663,12 @@ void setup()
 {
     Serial.begin(9600);
 
+    // wait for terminal to come up
+    delay(1000);
+
+    // start the watchdog
+    mbed::Watchdog::get_instance().start(WATCHDOG_TIMEOUT);
+
     info = boardInfo();
     if (info->magic == 0xB5)
     {
@@ -723,9 +721,6 @@ void setup()
     // begin the server
     server.begin();
     debugPrint("Server started");
-
-    // start the watchdog
-    mbed::Watchdog::get_instance().start(20000); // 20 seconds timeout
 }
 
 void loop()
@@ -737,6 +732,7 @@ void loop()
         app.process(&client);
         client.stop();
     }
+    mbed::Watchdog::get_instance().kick();
 }
 
 // arduino-cli compile --fqbn arduino:mbed_opta:opta ./
