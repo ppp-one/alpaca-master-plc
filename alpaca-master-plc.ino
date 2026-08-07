@@ -38,10 +38,13 @@ constexpr int domeOpenedSensorPin = A3;
 volatile bool safetyMonitorState;
 constexpr int safetyMonitorPin = A4;
 
+// telescope park state, polled by readStatesAndAct
+volatile bool telescopeParked = false;
+
 constexpr int CLOSED_DOME_LED = LED_D0;
 constexpr int OPENED_DOME_LED = LED_D1;
 constexpr int SAFETY_SIGNAL_LED = LED_D2;
-constexpr int HARDLINK_LED = LED_D3;
+constexpr int TELESCOPE_PARKED_LED = LED_D3;
 
 // user button (active LOW) long press toggles the hardlink
 constexpr unsigned long HARDLINK_BUTTON_HOLD = 3000; // 3 seconds
@@ -106,11 +109,11 @@ String split(String data, char separator, int index)
     return found > index ? data.substring(strIndex[0], strIndex[1]) : "";
 }
 
-// Set the hardlink running state and keep its LED in sync
-void setRunning(bool state)
+// Set the telescope parked state and keep its LED in sync
+void setTelescopeParked(bool state)
 {
-    running = state;
-    digitalWrite(HARDLINK_LED, running ? HIGH : LOW);
+    telescopeParked = state;
+    digitalWrite(TELESCOPE_PARKED_LED, telescopeParked ? HIGH : LOW);
 }
 
 // Toggle the hardlink on a 3 second press of the user button
@@ -137,7 +140,7 @@ void checkUserButton()
 
     if (!handled && millis() - pressedAt >= HARDLINK_BUTTON_HOLD)
     {
-        setRunning(!running);
+        running = !running;
         handled = true;
         debugPrint("Hardlink toggled by user button, running: ", running);
     }
@@ -226,7 +229,7 @@ void readStatesAndAct()
         digitalWrite(LED_BUILTIN, HIGH);
 
         // checks
-        bool telescopeParked = getTelescopeDirectParkedState();
+        setTelescopeParked(getTelescopeDirectParkedState());
 
         debugPrint("Safety monitor state: ", safetyMonitorState);
         debugPrint("Dome closed state: ", domeClosedSensor);
@@ -796,15 +799,15 @@ void hardlinkToggle(Request &req, Response &res)
         {
                 if (strcasecmp(stateBuf, "on") == 0 || strcmp(stateBuf, "1") == 0 || strcasecmp(stateBuf, "true") == 0)
                 {
-                        setRunning(true);
+                        running = true;
                 }
                 else if (strcasecmp(stateBuf, "off") == 0 || strcmp(stateBuf, "0") == 0 || strcasecmp(stateBuf, "false") == 0)
                 {
-                        setRunning(false);
+                        running = false;
                 }
                 else if (strcasecmp(stateBuf, "toggle") == 0)
                 {
-                        setRunning(!running);
+                        running = !running;
                 }
                 else
                 {
@@ -815,7 +818,7 @@ void hardlinkToggle(Request &req, Response &res)
         else
         {
                 // No param provided, default to toggle
-                setRunning(!running);
+                running = !running;
         }
 
         res.set("Content-Type", "application/json");
@@ -858,6 +861,8 @@ void statusState(Request &req, Response &res)
     res.print(domeOpenedSensor ? "true" : "false");
     res.print(", \"safetyMonitorState\": ");
     res.print(safetyMonitorState ? "true" : "false");
+    res.print(", \"telescopeParked\": ");
+    res.print(telescopeParked ? "true" : "false");
     res.print(", \"isSafe\": ");
     res.print(isSafe ? "true" : "false");
     res.print("}");
@@ -907,6 +912,7 @@ void rootPage(Request &req, Response &res)
         <div class="row"><span>Dome closed</span><strong id="domeClosedSensor" class="unknown">&hellip;</strong></div>
         <div class="row"><span>Dome opened</span><strong id="domeOpenedSensor" class="unknown">&hellip;</strong></div>
         <div class="row"><span>Safety monitor</span><strong id="safetyMonitorState" class="unknown">&hellip;</strong></div>
+        <div class="row"><span>Telescope</span><strong id="telescopeParked" class="unknown">&hellip;</strong></div>
 
         <hr>
 
@@ -938,6 +944,7 @@ void rootPage(Request &req, Response &res)
             set('domeClosedSensor', s.domeClosedSensor ? 'Closed' : 'Not closed', s.domeClosedSensor ? 'ok' : 'unknown');
             set('domeOpenedSensor', s.domeOpenedSensor ? 'Opened' : 'Not opened', s.domeOpenedSensor ? 'ok' : 'unknown');
             set('safetyMonitorState', s.safetyMonitorState ? 'Safe' : 'Unsafe', s.safetyMonitorState ? 'ok' : 'err');
+            set('telescopeParked', s.telescopeParked ? 'Parked' : 'Not parked', s.telescopeParked ? 'ok' : 'unknown');
             set('running', s.running ? 'On' : 'Off', s.running ? 'ok' : 'warn');
             set('errorFree', s.errorFree ? 'OK' : 'Error', s.errorFree ? 'ok' : 'err');
 
@@ -1027,7 +1034,7 @@ void setup()
     pinMode(CLOSED_DOME_LED, OUTPUT);
     pinMode(OPENED_DOME_LED, OUTPUT);
     pinMode(SAFETY_SIGNAL_LED, OUTPUT);
-    pinMode(HARDLINK_LED, OUTPUT);
+    pinMode(TELESCOPE_PARKED_LED, OUTPUT);
     pinMode(LED_BUILTIN, OUTPUT);
 
     // set pins for sensors
@@ -1043,8 +1050,8 @@ void setup()
     domeOpenedSensorISR();
     safetyMonitorISR();
 
-    // show the initial hardlink state
-    setRunning(running);
+    // parked state is unknown until the first poll
+    setTelescopeParked(false);
 
     // Attach interrupts to the sensors
     attachInterrupt(digitalPinToInterrupt(domeClosedSensorPin), domeClosedSensorISR, CHANGE);
