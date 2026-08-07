@@ -163,6 +163,7 @@ void readStatesAndAct()
         // If not running, idle briefly and continue so we can be resumed
         if (!running)
         {
+            debugPrint("Not running, idling");
             digitalWrite(LED_BUILTIN, LOW);
             rtos::ThisThread::sleep_for(500);
             continue;
@@ -171,6 +172,7 @@ void readStatesAndAct()
         // if not errorFree, blink and continue
         if (!errorFree)
         {
+            debugPrint("Error state detected, blinking LED");
             digitalWrite(LED_BUILTIN, LOW);
             rtos::ThisThread::sleep_for(100);
             digitalWrite(LED_BUILTIN, HIGH);
@@ -195,6 +197,7 @@ void readStatesAndAct()
         // if dome possibly stuck open and telescope not parked, abort all movements
         if (!telescopeParked && !domeClosedSensor && !domeOpenedSensor && running)
         {
+            debugPrint("Dome possibly stuck open and telescope not parked, aborting movements");
             abortDomeMovement();
             abortTelescopeMovement();
             errorFree = false;
@@ -222,6 +225,7 @@ void readStatesAndAct()
 
         if (action)
         {
+            debugPrint("Action: closing observatory");
             closeObservatory();
         }
 
@@ -233,6 +237,7 @@ void readStatesAndAct()
 
 bool getTelescopeDirectParkedState()
 {
+    debugPrint("Checking telescope parked state");
     // TCP/IP connection to the telescope
     String response = simpleNetcat(telescopeDirectIP, telescopeDirectPort, ":Ginfo#", true);
 
@@ -284,6 +289,7 @@ bool getTelescopeDirectParkedState()
     debugPrint("Telescope status: ", status);
     debugPrint("Telescope azimuth: ", azimuth);
     debugPrint("Telescope altitude: ", altitude);
+    debugPrint("Telescope isParked: ", isParked);
 
     // Check if the mount is parked
     return isParked;
@@ -291,8 +297,11 @@ bool getTelescopeDirectParkedState()
 
 void closeObservatory()
 {
+    // Check if the telescope is parked
+    bool telescopeParked = getTelescopeDirectParkedState();
+
     // Park the telescope if it is not already parked
-    if (getTelescopeDirectParkedState() == false)
+    if (!telescopeParked)
     {
         // Abort any current movements
         abortDomeMovement();
@@ -307,11 +316,12 @@ void closeObservatory()
             parkTelescope();
             rtos::ThisThread::sleep_for(100);
         }
+
+        // Check if the telescope is parked again
+        telescopeParked = getTelescopeDirectParkedState();
     }
 
-    rtos::ThisThread::sleep_for(1000);
-
-    if (getTelescopeDirectParkedState() == true && domeClosedSensor != 1)
+    if (telescopeParked && domeClosedSensor != 1)
     {
         // Close the dome
         closeDome();
@@ -320,6 +330,7 @@ void closeObservatory()
 
 void parkTelescope()
 {
+    debugPrint("Parking telescope");
     // Park the telescope
     simpleNetcat(telescopeDirectIP, telescopeDirectPort, ":KA#", false);
     rtos::ThisThread::sleep_for(100);
@@ -339,6 +350,7 @@ void parkTelescope()
 
 void closeDome()
 {
+    debugPrint("Closing dome");
     // Close the dome
     String payload = sendRequest("PUT", "/api/v1/dome/0/closeshutter", "", domeAlpacaIP, domeAlpacaPort);
 
@@ -357,12 +369,14 @@ void closeDome()
 
 void abortDomeMovement()
 {
+    debugPrint("Aborting dome movement");
     // Abort the dome movement
     sendRequest("PUT", "/api/v1/dome/0/abortslew", "", domeAlpacaIP, domeAlpacaPort);
 }
 
 void abortTelescopeMovement()
 {
+    debugPrint("Aborting telescope movement");
     // Abort the telescope movement
     simpleNetcat(telescopeDirectIP, telescopeDirectPort, ":STOP#", false);
 }
