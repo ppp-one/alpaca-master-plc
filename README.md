@@ -70,11 +70,13 @@ Edit IP addresses in [alpaca-master-plc.ino](alpaca-master-plc.ino):
 
 ## Web UI
 
-- Hardlink automatic control: `http://192.168.1.10/hardlink`
+Control page: `http://192.168.1.10/`
+
+- Hardlink automatic control
 	- Shows current "Running" state and a button to toggle it
 	- Confirms: “Are you sure you want to turn the hardlink on/off?”
 
-- Error reset: `http://192.168.1.10/errorfree`
+- Error reset
 	- Shows current error state (OK / Error) and a "Reset errors" button
 
 Notes
@@ -90,12 +92,12 @@ ASCOM Alpaca (Safety Monitor):
 
 Simple control APIs:
 - Hardlink (Running)
-	- `GET /api/hardlink/state` → `{ "running": true|false }`
-	- `POST /api/hardlink/toggle` with `state=on|off|toggle` → `{ "ok": true, "running": ... }`
+	- `GET /hardlink/state` → `{ "running": true|false }`
+	- `POST /hardlink/toggle` with `state=on|off|toggle` → `{ "ok": true, "running": ... }`
 
 - Error state (errorFree)
-	- `GET /api/errorfree/state` → `{ "errorFree": true|false }`
-	- `POST /api/errorfree/reset` → `{ "ok": true, "errorFree": true }`
+	- `GET /errorfree/state` → `{ "errorFree": true|false }`
+	- `POST /errorfree/reset` → `{ "ok": true, "errorFree": true }`
 
 
 ## License

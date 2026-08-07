@@ -784,66 +784,6 @@ void hardlinkToggle(Request &req, Response &res)
         res.print("}");
 }
 
-// Simple UI page to toggle running state with confirmation
-void hardlinkPage(Request &req, Response &res)
-{
-        res.set("Content-Type", "text/html; charset=utf-8");
-
-        String stateText = running ? "On" : "Off";
-        String nextState = running ? "off" : "on";
-
-        String html = R"~(
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hardlink control</title>
-    <style>
-        body { font-family: system-ui; margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; height: 100vh; background-color: #121212; color: #fff; }
-        .container { padding: 20px; border-radius: 8px; width: 320px; background-color: #1e1e1e; box-shadow: 0 0 10px rgba(0,0,0,0.3); }
-        h2 { margin-top: 0; font-size: large; font-weight: 500; color: #ccc; }
-        .state { margin: 12px 0 20px; font-size: 18px; }
-        .btn { display: inline-block; width: 100%; padding: 12px; border-radius: 6px; border: none; cursor: pointer; font-weight: 600; }
-        .on { background: #2ecc71; color: #000; }
-        .off { background: #e67e22; color: #000; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h2>Hardlink control</h2>
-        <div class="state">Current state: <strong>)~" + stateText + R"~(</strong></div>
-        <button id="toggleBtn" class="btn )~" + (running ? String("off") : String("on")) + R"~(">Turn )~" + (running ? String("Off") : String("On")) + R"~(</button>
-    </div>
-    <script>
-        document.addEventListener('DOMContentLoaded', function () {
-            const nextState = ")~" + nextState + R"~(";
-            const btn = document.getElementById('toggleBtn');
-            if (!btn) return;
-            btn.addEventListener('click', async () => {
-                const ok = confirm(`Are you sure you want to turn the hardlink ${nextState}?`);
-                if (!ok) return;
-                try {
-                    const resp = await fetch('/api/hardlink/toggle', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                        body: `state=${nextState}`
-                    });
-                    if (!resp.ok) throw new Error('Request failed');
-                    location.reload();
-                } catch (e) {
-                    alert('Failed to toggle: ' + e.message);
-                }
-            });
-        });
-    </script>
-</body>
-</html>
-)~";
-
-        res.print(html);
-}
-
 // API: get current errorFree state
 void errorFreeState(Request &req, Response &res)
 {
@@ -862,13 +802,16 @@ void errorFreeReset(Request &req, Response &res)
     res.print("{\"ok\": true, \"errorFree\": true}");
 }
 
-// Simple UI page to display error state and provide a reset button
-void errorFreePage(Request &req, Response &res)
+// Single UI page at root with hardlink toggle and error reset
+void rootPage(Request &req, Response &res)
 {
         res.set("Content-Type", "text/html; charset=utf-8");
 
-        String stateText = errorFree ? "OK" : "Error";
-        String stateClass = errorFree ? "ok" : "err";
+        String linkText = running ? "On" : "Off";
+        String linkClass = running ? "ok" : "warn";
+        String nextState = running ? "off" : "on";
+        String errText = errorFree ? "OK" : "Error";
+        String errClass = errorFree ? "ok" : "err";
 
         String html = R"~(
 <!DOCTYPE html>
@@ -876,42 +819,74 @@ void errorFreePage(Request &req, Response &res)
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Error state</title>
+    <title>Alpaca master PLC</title>
     <style>
-        body { font-family: system-ui; margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; height: 100vh; background-color: #121212; color: #fff; }
+        body { font-family: system-ui; margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; background-color: #121212; color: #fff; }
         .container { padding: 20px; border-radius: 8px; width: 320px; background-color: #1e1e1e; box-shadow: 0 0 10px rgba(0,0,0,0.3); }
         h2 { margin-top: 0; font-size: large; font-weight: 500; color: #ccc; }
-        .state { margin: 12px 0 20px; font-size: 18px; }
+        h3 { font-size: medium; font-weight: 500; color: #ccc; margin-bottom: 4px; }
+        .state { margin: 8px 0 14px; font-size: 18px; }
         .state .ok { color: #2ecc71; }
+        .state .warn { color: #e67e22; }
         .state .err { color: #e74c3c; }
         .btn { display: inline-block; width: 100%; padding: 12px; border-radius: 6px; border: none; cursor: pointer; font-weight: 600; }
+        .on { background: #2ecc71; color: #000; }
+        .off { background: #e67e22; color: #000; }
         .reset { background: #93d4ff; color: #000; }
-        .links { margin-top: 14px; font-size: 14px; }
-        .links a { color: #93d4ff; text-decoration: none; }
+        hr { border: none; border-top: 1px solid #333; margin: 22px 0; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h2>Error state</h2>
-        <div class="state">Current: <strong class=")~" + stateClass + R"~(">)~" + stateText + R"~(</strong></div>
+        <h2>Alpaca master PLC</h2>
+
+        <h3>Hardlink</h3>
+        <div class="state">Current state: <strong class=")~" + linkClass + R"~(">)~" + linkText + R"~(</strong></div>
+        <button id="toggleBtn" class="btn )~" + (running ? String("off") : String("on")) + R"~(">Turn )~" + (running ? String("Off") : String("On")) + R"~(</button>
+
+        <hr>
+
+        <h3>Error state</h3>
+        <div class="state">Current: <strong class=")~" + errClass + R"~(">)~" + errText + R"~(</strong></div>
         <button id="resetBtn" class="btn reset">Reset errors</button>
-        <div class="links"><a href="/hardlink">Go to hardlink control</a></div>
     </div>
     <script>
         document.addEventListener('DOMContentLoaded', function () {
-            const btn = document.getElementById('resetBtn');
-            if (!btn) return;
-            btn.addEventListener('click', async () => {
-                const ok = confirm('Are you sure you want to reset errors?');
-                if (!ok) return;
-                try {
-                    const resp = await fetch('/api/errorfree/reset', { method: 'POST' });
-                    if (!resp.ok) throw new Error('Request failed');
-                    location.reload();
-                } catch (e) {
-                    alert('Failed to reset: ' + e.message);
-                }
-            });
+            const nextState = ")~" + nextState + R"~(";
+
+            const toggleBtn = document.getElementById('toggleBtn');
+            if (toggleBtn) {
+                toggleBtn.addEventListener('click', async () => {
+                    const ok = confirm(`Are you sure you want to turn the hardlink ${nextState}?`);
+                    if (!ok) return;
+                    try {
+                        const resp = await fetch('/hardlink/toggle', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                            body: `state=${nextState}`
+                        });
+                        if (!resp.ok) throw new Error('Request failed');
+                        location.reload();
+                    } catch (e) {
+                        alert('Failed to toggle: ' + e.message);
+                    }
+                });
+            }
+
+            const resetBtn = document.getElementById('resetBtn');
+            if (resetBtn) {
+                resetBtn.addEventListener('click', async () => {
+                    const ok = confirm('Are you sure you want to reset errors?');
+                    if (!ok) return;
+                    try {
+                        const resp = await fetch('/errorfree/reset', { method: 'POST' });
+                        if (!resp.ok) throw new Error('Request failed');
+                        location.reload();
+                    } catch (e) {
+                        alert('Failed to reset: ' + e.message);
+                    }
+                });
+            }
         });
     </script>
 </body>
@@ -979,15 +954,16 @@ void setup()
     app.get("/api/v1/safetymonitor/0/name", &endPoint);
     app.get("/api/v1/safetymonitor/0/driverversion", &endPoint);
 
+    // Control page with hardlink toggle and error reset
+    app.get("/", &rootPage);
+
     // Simple hardlink control endpoints
-    app.get("/api/hardlink/state", &hardlinkState);
-    app.post("/api/hardlink/toggle", &hardlinkToggle);
-    app.get("/hardlink", &hardlinkPage);
+    app.get("/hardlink/state", &hardlinkState);
+    app.post("/hardlink/toggle", &hardlinkToggle);
 
     // Error state endpoints
-    app.get("/api/errorfree/state", &errorFreeState);
-    app.post("/api/errorfree/reset", &errorFreeReset);
-    app.get("/errorfree", &errorFreePage);
+    app.get("/errorfree/state", &errorFreeState);
+    app.post("/errorfree/reset", &errorFreeReset);
 
     // start ReadStatesAndActThread thread
     ReadStatesAndActThread.start(readStatesAndAct);
