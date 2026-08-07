@@ -46,8 +46,9 @@ In addition, it provides a tiny web UI and simple control APIs (documented below
 - Connect safety sensor to **A4** (HIGH = safe)
 - Connect dome closed sensor to **A2** (HIGH when closed)
 - Connect dome opened sensor to **A3** (HIGH when open)
-- LEDs D0, D1, D2 indicate dome closed, dome opened, and safety status respectively
+- LEDs D0, D1, D2, D3 indicate dome closed, dome opened, safety status, and hardlink on respectively
 - User LED flashes slowly under normal operation, fast when error encountered, or off when disabled
+- Holding the **USER button** for 3 seconds toggles the hardlink on/off
 
 ## Compilation & Upload
 
@@ -72,6 +73,9 @@ Edit IP addresses in [alpaca-master-plc.ino](alpaca-master-plc.ino):
 
 Control page: `http://192.168.1.10/`
 
+- Sensors
+	- Live readout of the dome closed, dome opened, and safety monitor inputs (refreshed every 2 s)
+
 - Hardlink automatic control
 	- Shows current "Running" state and a button to toggle it
 	- Confirms: “Are you sure you want to turn the hardlink on/off?”
@@ -91,6 +95,9 @@ ASCOM Alpaca (Safety Monitor):
 - `GET /api/v1/safetymonitor/0/driverversion` – driver version
 
 Simple control APIs:
+- Combined state (used by the web UI)
+	- `GET /state` → `{ "running": ..., "errorFree": ..., "domeClosedSensor": ..., "domeOpenedSensor": ..., "safetyMonitorState": ..., "isSafe": ... }`
+
 - Hardlink (Running)
 	- `GET /hardlink/state` → `{ "running": true|false }`
 	- `POST /hardlink/toggle` with `state=on|off|toggle` → `{ "ok": true, "running": ... }`

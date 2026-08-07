@@ -41,6 +41,10 @@ constexpr int safetyMonitorPin = A4;
 constexpr int CLOSED_DOME_LED = LED_D0;
 constexpr int OPENED_DOME_LED = LED_D1;
 constexpr int SAFETY_SIGNAL_LED = LED_D2;
+constexpr int HARDLINK_LED = LED_D3;
+
+// user button (active LOW) long press toggles the hardlink
+constexpr unsigned long HARDLINK_BUTTON_HOLD = 3000; // 3 seconds
 
 // isSafe
 volatile bool isSafe = false;
@@ -100,6 +104,43 @@ String split(String data, char separator, int index)
     }
 
     return found > index ? data.substring(strIndex[0], strIndex[1]) : "";
+}
+
+// Set the hardlink running state and keep its LED in sync
+void setRunning(bool state)
+{
+    running = state;
+    digitalWrite(HARDLINK_LED, running ? HIGH : LOW);
+}
+
+// Toggle the hardlink on a 3 second press of the user button
+void checkUserButton()
+{
+    static unsigned long pressedAt = 0;
+    static bool handled = false;
+
+    // the user button pulls the pin low while pressed
+    bool pressed = digitalRead(BTN_USER) == LOW;
+
+    if (!pressed)
+    {
+        pressedAt = 0;
+        handled = false;
+        return;
+    }
+
+    if (pressedAt == 0)
+    {
+        pressedAt = millis();
+        return;
+    }
+
+    if (!handled && millis() - pressedAt >= HARDLINK_BUTTON_HOLD)
+    {
+        setRunning(!running);
+        handled = true;
+        debugPrint("Hardlink toggled by user button, running: ", running);
+    }
 }
 
 // ISR for dome closed sensor
@@ -755,15 +796,15 @@ void hardlinkToggle(Request &req, Response &res)
         {
                 if (strcasecmp(stateBuf, "on") == 0 || strcmp(stateBuf, "1") == 0 || strcasecmp(stateBuf, "true") == 0)
                 {
-                        running = true;
+                        setRunning(true);
                 }
                 else if (strcasecmp(stateBuf, "off") == 0 || strcmp(stateBuf, "0") == 0 || strcasecmp(stateBuf, "false") == 0)
                 {
-                        running = false;
+                        setRunning(false);
                 }
                 else if (strcasecmp(stateBuf, "toggle") == 0)
                 {
-                        running = !running;
+                        setRunning(!running);
                 }
                 else
                 {
@@ -774,7 +815,7 @@ void hardlinkToggle(Request &req, Response &res)
         else
         {
                 // No param provided, default to toggle
-                running = !running;
+                setRunning(!running);
         }
 
         res.set("Content-Type", "application/json");
@@ -802,18 +843,34 @@ void errorFreeReset(Request &req, Response &res)
     res.print("{\"ok\": true, \"errorFree\": true}");
 }
 
-// Single UI page at root with hardlink toggle and error reset
+// API: all states in one response, used by the page to refresh itself
+void statusState(Request &req, Response &res)
+{
+    res.set("Content-Type", "application/json");
+    res.print("{");
+    res.print("\"running\": ");
+    res.print(running ? "true" : "false");
+    res.print(", \"errorFree\": ");
+    res.print(errorFree ? "true" : "false");
+    res.print(", \"domeClosedSensor\": ");
+    res.print(domeClosedSensor ? "true" : "false");
+    res.print(", \"domeOpenedSensor\": ");
+    res.print(domeOpenedSensor ? "true" : "false");
+    res.print(", \"safetyMonitorState\": ");
+    res.print(safetyMonitorState ? "true" : "false");
+    res.print(", \"isSafe\": ");
+    res.print(isSafe ? "true" : "false");
+    res.print("}");
+}
+
+// Single UI page at root with sensor readout, hardlink toggle and error reset
+// All values are filled in and kept up to date by polling /state, so the page
+// also follows changes made from the user button on the PLC.
 void rootPage(Request &req, Response &res)
 {
         res.set("Content-Type", "text/html; charset=utf-8");
 
-        String linkText = running ? "On" : "Off";
-        String linkClass = running ? "ok" : "warn";
-        String nextState = running ? "off" : "on";
-        String errText = errorFree ? "OK" : "Error";
-        String errClass = errorFree ? "ok" : "err";
-
-        String html = R"~(
+        res.print(R"~(
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -825,14 +882,20 @@ void rootPage(Request &req, Response &res)
         .container { padding: 20px; border-radius: 8px; width: 320px; background-color: #1e1e1e; box-shadow: 0 0 10px rgba(0,0,0,0.3); }
         h2 { margin-top: 0; font-size: large; font-weight: 500; color: #ccc; }
         h3 { font-size: medium; font-weight: 500; color: #ccc; margin-bottom: 4px; }
+        .row { display: flex; justify-content: space-between; align-items: baseline; padding: 6px 0; border-bottom: 1px solid #2a2a2a; font-size: 15px; }
+        .row:last-child { border-bottom: none; }
+        .row span { color: #999; }
         .state { margin: 8px 0 14px; font-size: 18px; }
-        .state .ok { color: #2ecc71; }
-        .state .warn { color: #e67e22; }
-        .state .err { color: #e74c3c; }
+        .ok { color: #2ecc71; }
+        .warn { color: #e67e22; }
+        .err { color: #e74c3c; }
+        .unknown { color: #999; }
         .btn { display: inline-block; width: 100%; padding: 12px; border-radius: 6px; border: none; cursor: pointer; font-weight: 600; }
+        .btn:disabled { opacity: 0.5; cursor: default; }
         .on { background: #2ecc71; color: #000; }
         .off { background: #e67e22; color: #000; }
         .reset { background: #93d4ff; color: #000; }
+        .stale { color: #e74c3c; font-size: 13px; margin-top: 12px; display: none; }
         hr { border: none; border-top: 1px solid #333; margin: 22px 0; }
     </style>
 </head>
@@ -840,60 +903,94 @@ void rootPage(Request &req, Response &res)
     <div class="container">
         <h2>Alpaca master PLC</h2>
 
+        <h3>Sensors</h3>
+        <div class="row"><span>Dome closed</span><strong id="domeClosedSensor" class="unknown">&hellip;</strong></div>
+        <div class="row"><span>Dome opened</span><strong id="domeOpenedSensor" class="unknown">&hellip;</strong></div>
+        <div class="row"><span>Safety monitor</span><strong id="safetyMonitorState" class="unknown">&hellip;</strong></div>
+
+        <hr>
+
         <h3>Hardlink</h3>
-        <div class="state">Current state: <strong class=")~" + linkClass + R"~(">)~" + linkText + R"~(</strong></div>
-        <button id="toggleBtn" class="btn )~" + (running ? String("off") : String("on")) + R"~(">Turn )~" + (running ? String("Off") : String("On")) + R"~(</button>
+        <div class="state">Current state: <strong id="running" class="unknown">&hellip;</strong></div>
+        <button id="toggleBtn" class="btn" disabled>&hellip;</button>
 
         <hr>
 
         <h3>Error state</h3>
-        <div class="state">Current: <strong class=")~" + errClass + R"~(">)~" + errText + R"~(</strong></div>
+        <div class="state">Current: <strong id="errorFree" class="unknown">&hellip;</strong></div>
         <button id="resetBtn" class="btn reset">Reset errors</button>
+
+        <div id="stale" class="stale">Connection lost, values may be out of date.</div>
     </div>
     <script>
-        document.addEventListener('DOMContentLoaded', function () {
-            const nextState = ")~" + nextState + R"~(";
+        const toggleBtn = document.getElementById('toggleBtn');
+        const resetBtn = document.getElementById('resetBtn');
+        const stale = document.getElementById('stale');
+        let running = null;
 
-            const toggleBtn = document.getElementById('toggleBtn');
-            if (toggleBtn) {
-                toggleBtn.addEventListener('click', async () => {
-                    const ok = confirm(`Are you sure you want to turn the hardlink ${nextState}?`);
-                    if (!ok) return;
-                    try {
-                        const resp = await fetch('/hardlink/toggle', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                            body: `state=${nextState}`
-                        });
-                        if (!resp.ok) throw new Error('Request failed');
-                        location.reload();
-                    } catch (e) {
-                        alert('Failed to toggle: ' + e.message);
-                    }
-                });
+        function set(id, text, cls) {
+            const el = document.getElementById(id);
+            el.textContent = text;
+            el.className = cls;
+        }
+
+        function render(s) {
+            set('domeClosedSensor', s.domeClosedSensor ? 'Closed' : 'Not closed', s.domeClosedSensor ? 'ok' : 'unknown');
+            set('domeOpenedSensor', s.domeOpenedSensor ? 'Opened' : 'Not opened', s.domeOpenedSensor ? 'ok' : 'unknown');
+            set('safetyMonitorState', s.safetyMonitorState ? 'Safe' : 'Unsafe', s.safetyMonitorState ? 'ok' : 'err');
+            set('running', s.running ? 'On' : 'Off', s.running ? 'ok' : 'warn');
+            set('errorFree', s.errorFree ? 'OK' : 'Error', s.errorFree ? 'ok' : 'err');
+
+            running = s.running;
+            toggleBtn.textContent = running ? 'Turn Off' : 'Turn On';
+            toggleBtn.className = 'btn ' + (running ? 'off' : 'on');
+            toggleBtn.disabled = false;
+        }
+
+        async function refresh() {
+            try {
+                const resp = await fetch('/state');
+                if (!resp.ok) throw new Error('Request failed');
+                render(await resp.json());
+                stale.style.display = 'none';
+            } catch (e) {
+                stale.style.display = 'block';
             }
+        }
 
-            const resetBtn = document.getElementById('resetBtn');
-            if (resetBtn) {
-                resetBtn.addEventListener('click', async () => {
-                    const ok = confirm('Are you sure you want to reset errors?');
-                    if (!ok) return;
-                    try {
-                        const resp = await fetch('/errorfree/reset', { method: 'POST' });
-                        if (!resp.ok) throw new Error('Request failed');
-                        location.reload();
-                    } catch (e) {
-                        alert('Failed to reset: ' + e.message);
-                    }
+        toggleBtn.addEventListener('click', async () => {
+            const nextState = running ? 'off' : 'on';
+            if (!confirm(`Are you sure you want to turn the hardlink ${nextState}?`)) return;
+            try {
+                const resp = await fetch('/hardlink/toggle', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: `state=${nextState}`
                 });
+                if (!resp.ok) throw new Error('Request failed');
+                await refresh();
+            } catch (e) {
+                alert('Failed to toggle: ' + e.message);
             }
         });
+
+        resetBtn.addEventListener('click', async () => {
+            if (!confirm('Are you sure you want to reset errors?')) return;
+            try {
+                const resp = await fetch('/errorfree/reset', { method: 'POST' });
+                if (!resp.ok) throw new Error('Request failed');
+                await refresh();
+            } catch (e) {
+                alert('Failed to reset: ' + e.message);
+            }
+        });
+
+        refresh();
+        setInterval(refresh, 2000);
     </script>
 </body>
 </html>
-)~";
-
-        res.print(html);
+)~");
 }
 
 void setup()
@@ -930,6 +1027,7 @@ void setup()
     pinMode(CLOSED_DOME_LED, OUTPUT);
     pinMode(OPENED_DOME_LED, OUTPUT);
     pinMode(SAFETY_SIGNAL_LED, OUTPUT);
+    pinMode(HARDLINK_LED, OUTPUT);
     pinMode(LED_BUILTIN, OUTPUT);
 
     // set pins for sensors
@@ -937,10 +1035,16 @@ void setup()
     pinMode(domeOpenedSensorPin, INPUT);
     pinMode(safetyMonitorPin, INPUT);
 
+    // user button toggles the hardlink on a long press
+    pinMode(BTN_USER, INPUT);
+
     // call all ISRs
     domeClosedSensorISR();
     domeOpenedSensorISR();
     safetyMonitorISR();
+
+    // show the initial hardlink state
+    setRunning(running);
 
     // Attach interrupts to the sensors
     attachInterrupt(digitalPinToInterrupt(domeClosedSensorPin), domeClosedSensorISR, CHANGE);
@@ -954,8 +1058,9 @@ void setup()
     app.get("/api/v1/safetymonitor/0/name", &endPoint);
     app.get("/api/v1/safetymonitor/0/driverversion", &endPoint);
 
-    // Control page with hardlink toggle and error reset
+    // Control page with sensor readout, hardlink toggle and error reset
     app.get("/", &rootPage);
+    app.get("/state", &statusState);
 
     // Simple hardlink control endpoints
     app.get("/hardlink/state", &hardlinkState);
@@ -975,6 +1080,8 @@ void setup()
 
 void loop()
 {
+    checkUserButton();
+
     EthernetClient client = server.available();
 
     if (client.connected())
