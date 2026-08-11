@@ -55,9 +55,12 @@ volatile bool errorFree = true;
 volatile bool running = true;
 
 // Blocking flags
-const unsigned long FUNCTION_TIMEOUT = 10000; // 10 seconds total timeout
+const unsigned long FUNCTION_TIMEOUT = 10000; // 10 seconds total timeout, per attempt
 const unsigned long DEVICE_TIMEOUT = 180000;  // 3 minutes total timeout
 const unsigned long WATCHDOG_TIMEOUT = 20000; // 20 seconds watchdog timeout
+
+// network attempts before a request is given up on and errorFree is cleared
+const int REQUEST_ATTEMPTS = 3;
 
 // Thread for reading states
 static rtos::Thread ReadStatesAndActThread;
@@ -451,12 +454,12 @@ void abortTelescopeMovement()
 // Function to forward a request to a server and receive a response
 String sendRequest(const char *methodStr, const char *path, String requestBuffer, IPAddress targetServerIP, int targetServerPort)
 {
-    int attempts = 0;
-    while (attempts < 3)
+    for (int attempt = 1; attempt <= REQUEST_ATTEMPTS; attempt++)
     {
-        // Overall function timeout
+        // Per attempt timeout
         unsigned long functionStartTime = millis();
 
+        debugPrint("Request attempt: ", attempt);
         debugPrint("Request method: ", methodStr);
         debugPrint("Request path: ", path);
         debugPrint("Request body: ", requestBuffer.c_str());
@@ -477,91 +480,89 @@ String sendRequest(const char *methodStr, const char *path, String requestBuffer
                 break;
             }
 
-            // Check overall function timeout
+            // Check per attempt timeout
             if (millis() - functionStartTime > FUNCTION_TIMEOUT)
             {
                 Serial.println("Function execution timeout during connection");
-                attempts++;
-                break; // Or return an error message
+                break;
             }
 
             rtos::ThisThread::sleep_for(100);
         }
 
-        if (connectSuccess)
-        {
-            debugPrint("Connected to target server");
-
-            // Send the request line
-            ethClient.print(methodStr);
-            ethClient.print(" ");
-            ethClient.print(path);
-
-                    // For GET requests, append parameters to the URL if they exist
-                    if (strcmp(methodStr, "GET") == 0 && requestBuffer.length() > 0)
-            {
-                ethClient.print("?");
-                ethClient.print(requestBuffer);
-            }
-
-            ethClient.println(" HTTP/1.0");
-
-            // Add required headers
-            ethClient.print("Host: ");
-            ethClient.print(targetServerIP[0]);
-            for (int i = 1; i < 4; i++)
-            {
-                ethClient.print(".");
-                ethClient.print(targetServerIP[i]);
-            }
-            ethClient.print(":");
-            ethClient.println(targetServerPort);
-
-            ethClient.println("Connection: close");
-
-            // Add Content-Length and Content-Type for PUT requests with body
-            if ((strcmp(methodStr, "PUT") == 0) &&
-                requestBuffer.length() > 0)
-            {
-                ethClient.print("Content-Length: ");
-                ethClient.println(requestBuffer.length());
-                ethClient.println("Content-Type: application/x-www-form-urlencoded");
-
-                // End headers with blank line
-                ethClient.println();
-
-                // Send the body
-                ethClient.print(requestBuffer);
-            }
-            else
-            {
-                // End headers with blank line
-                ethClient.println();
-            }
-
-            debugPrint("Request sent to target server");
-        }
-        else
+        if (!connectSuccess)
         {
             Serial.println("Connection to target server failed");
             ethClient.stop();
-            // res.status(502); // Bad Gateway
-            // res.print("{\"error\":\"Unable to connect to target server\"}");
-            attempts++;
-            break;
+            rtos::ThisThread::sleep_for(100);
+            continue;
         }
+
+        debugPrint("Connected to target server");
+
+        // Send the request line
+        ethClient.print(methodStr);
+        ethClient.print(" ");
+        ethClient.print(path);
+
+        // For GET requests, append parameters to the URL if they exist
+        if (strcmp(methodStr, "GET") == 0 && requestBuffer.length() > 0)
+        {
+            ethClient.print("?");
+            ethClient.print(requestBuffer);
+        }
+
+        ethClient.println(" HTTP/1.0");
+
+        // Add required headers
+        ethClient.print("Host: ");
+        ethClient.print(targetServerIP[0]);
+        for (int i = 1; i < 4; i++)
+        {
+            ethClient.print(".");
+            ethClient.print(targetServerIP[i]);
+        }
+        ethClient.print(":");
+        ethClient.println(targetServerPort);
+
+        ethClient.println("Connection: close");
+
+        // Add Content-Length and Content-Type for PUT requests with body
+        if ((strcmp(methodStr, "PUT") == 0) &&
+            requestBuffer.length() > 0)
+        {
+            ethClient.print("Content-Length: ");
+            ethClient.println(requestBuffer.length());
+            ethClient.println("Content-Type: application/x-www-form-urlencoded");
+
+            // End headers with blank line
+            ethClient.println();
+
+            // Send the body
+            ethClient.print(requestBuffer);
+        }
+        else
+        {
+            // End headers with blank line
+            ethClient.println();
+        }
+
+        debugPrint("Request sent to target server");
 
         String header = "";
         String body = "";
         bool isBody = false;
+        bool readTimeout = false;
 
-        while (ethClient.connected())
+        // keep reading while bytes are still buffered, the peer closes the
+        // connection as soon as it has sent the response
+        while (ethClient.connected() || ethClient.available())
         {
             // Check response timeout
             if (millis() - functionStartTime > FUNCTION_TIMEOUT)
             {
                 Serial.println("Response read timeout");
-                attempts++;
+                readTimeout = true;
                 break;
             }
 
@@ -590,22 +591,34 @@ String sendRequest(const char *methodStr, const char *path, String requestBuffer
         debugPrint("Body:", body);
         debugPrint(" ");
 
+        // a timed out or empty response is a failed attempt, retry rather than
+        // handing the caller a body it cannot act on
+        if (readTimeout || body.length() == 0)
+        {
+            debugPrint("No usable response, retrying");
+            rtos::ThisThread::sleep_for(100);
+            continue;
+        }
+
         return body;
     }
 
     errorFree = false;
-    Serial.println("Failed to send request after 3 attempts");
+    Serial.print("Failed to send request after ");
+    Serial.print(REQUEST_ATTEMPTS);
+    Serial.println(" attempts");
     return "";
 }
 
 // Function to send data to a server and receive response
 String simpleNetcat(IPAddress host, int port, String content, bool expectResponse)
 {
-    int attempts = 0;
-    while (attempts < 3)
+    for (int attempt = 1; attempt <= REQUEST_ATTEMPTS; attempt++)
     {
-        // Overall function timeout
+        // Per attempt timeout
         unsigned long functionStartTime = millis();
+
+        debugPrint("Netcat attempt: ", attempt);
 
         String response = "";
         EthernetClient netCatClient;
@@ -623,7 +636,7 @@ String simpleNetcat(IPAddress host, int port, String content, bool expectRespons
                 break;
             }
 
-            // Check overall function timeout
+            // Check per attempt timeout
             if (millis() - functionStartTime > FUNCTION_TIMEOUT)
             {
                 Serial.println("Function execution timeout during connection");
@@ -633,21 +646,27 @@ String simpleNetcat(IPAddress host, int port, String content, bool expectRespons
             rtos::ThisThread::sleep_for(100);
         }
 
-        // Try to connect to the server
-        if (connectSuccess)
-        {
-            // Send the content
-            netCatClient.print(content);
-        }
-        else
+        if (!connectSuccess)
         {
             Serial.println("Connection to target server failed");
             netCatClient.stop();
-            attempts++;
-            break;
+            rtos::ThisThread::sleep_for(100);
+            continue;
         }
 
-        while (netCatClient.connected() && expectResponse)
+        // Send the content
+        netCatClient.print(content);
+
+        // nothing to wait for on fire and forget commands
+        if (!expectResponse)
+        {
+            netCatClient.stop();
+            return "";
+        }
+
+        // keep reading while bytes are still buffered, the mount closes the
+        // connection as soon as it has sent the reply
+        while (netCatClient.connected() || netCatClient.available())
         {
             // Check response timeout
             if (millis() - functionStartTime > FUNCTION_TIMEOUT)
@@ -673,11 +692,23 @@ String simpleNetcat(IPAddress host, int port, String content, bool expectRespons
 
         debugPrint("Response:", response);
 
+        // a complete reply is terminated by '#', anything shorter is a failed
+        // attempt. Retry rather than returning a truncated string, which the
+        // caller would parse as "not parked"
+        if (!response.endsWith("#"))
+        {
+            debugPrint("Incomplete response, retrying");
+            rtos::ThisThread::sleep_for(100);
+            continue;
+        }
+
         return response;
     }
 
     errorFree = false;
-    Serial.println("Failed to send request after 3 attempts");
+    Serial.print("Failed to send request after ");
+    Serial.print(REQUEST_ATTEMPTS);
+    Serial.println(" attempts");
     return "";
 }
 
