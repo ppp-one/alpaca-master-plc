@@ -217,10 +217,19 @@ void readStatesAndAct()
         if (!errorFree)
         {
             debugPrint("Error state detected, blinking LED");
+
+            // keep publishing the parked state, otherwise a latched error
+            // freezes the LED and the web page on a stale value
+            setTelescopeParked(getTelescopeDirectParkedState());
+
             digitalWrite(LED_BUILTIN, LOW);
             rtos::ThisThread::sleep_for(100);
             digitalWrite(LED_BUILTIN, HIGH);
             rtos::ThisThread::sleep_for(100);
+
+            // hold the same ~1 s cadence as the normal path so the mount is
+            // not polled five times a second while in error
+            rtos::ThisThread::sleep_for(800);
             continue;
         }
 
@@ -341,8 +350,10 @@ bool getTelescopeDirectParkedState()
 
 void closeObservatory()
 {
-    // Check if the telescope is parked
-    bool telescopeParked = getTelescopeDirectParkedState();
+    // Check if the telescope is parked. This must publish to the global so the
+    // LED and the web page follow the close sequence, which can block this
+    // thread for minutes.
+    setTelescopeParked(getTelescopeDirectParkedState());
 
     // Park the telescope if it is not already parked
     if (!telescopeParked)
@@ -362,7 +373,7 @@ void closeObservatory()
         }
 
         // Check if the telescope is parked again
-        telescopeParked = getTelescopeDirectParkedState();
+        setTelescopeParked(getTelescopeDirectParkedState());
     }
 
     if (telescopeParked && domeClosedSensor != 1)
@@ -381,8 +392,16 @@ void parkTelescope()
 
     // Check if the telescope is parked in while loop, timeout after 180 seconds
     unsigned long startTime = millis();
-    while (getTelescopeDirectParkedState() == false)
+    while (true)
     {
+        // publish every poll so the LED and web page follow the park
+        setTelescopeParked(getTelescopeDirectParkedState());
+
+        if (telescopeParked)
+        {
+            break;
+        }
+
         if (millis() - startTime > DEVICE_TIMEOUT)
         {
             errorFree = false;
@@ -407,6 +426,10 @@ void closeDome()
             errorFree = false;
             break;
         }
+
+        // closing can take minutes, keep the parked readout live meanwhile
+        setTelescopeParked(getTelescopeDirectParkedState());
+
         rtos::ThisThread::sleep_for(1000);
     }
 }
