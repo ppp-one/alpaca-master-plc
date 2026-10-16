@@ -81,7 +81,7 @@ Control page: `http://192.168.1.10/`
 	- Confirms: “Are you sure you want to turn the hardlink on/off?”
 
 - Error reset
-	- Shows current error state (OK / Error) and a "Reset errors" button
+	- Shows current error state (OK / Error), the reason for the error, and a "Reset errors" button
 
 Notes
 - When Running is off, the background safety loop idles (no automatic actions) until re-enabled.
@@ -97,20 +97,29 @@ ASCOM Alpaca (ISafetyMonitorV3, device 0):
 
 Parameter names are case insensitive. PUT parameters are read from the form body. An unknown member or endpoint returns HTTP 400.
 
-When the PLC is in an error state (`errorFree` is false), `issafe` returns an Alpaca device error: `ErrorNumber` 1280 (0x500, driver specific), a non-empty `ErrorMessage`, and no `Value`. Clients such as alpyca raise an exception on this response. `devicestate` reports `IsSafe` false. The error clears when errors are reset on the web page.
+When the PLC is in an error state (`errorFree` is false), `issafe` returns an Alpaca device error: `ErrorNumber` 1280 (0x500, driver specific), an `ErrorMessage` that gives the reason, and no `Value`. Clients such as alpyca raise an exception on this response. `devicestate` reports `IsSafe` false. The error clears when errors are reset on the web page.
+
+The PLC keeps the reason for the first error since the last reset, because later errors are often caused by the first one. All reasons are also printed on the serial port. The sources are:
+- Dome between its open and closed sensors while the telescope is not parked
+- Telescope did not reach the park position within 180 s
+- Dome closed sensor not active within 180 s of the close command
+- Dome Alpaca request failed after 3 attempts (connection failed, response timed out, or empty response)
+- Telescope command failed after 3 attempts (connection failed, no reply, or incomplete reply)
+
+Example: `Master PLC error: Telescope command :Ginfo# failed after 3 attempts: connection failed. Reset errors on the PLC web page`
 
 `issafe` is not refused while disconnected, so one client disconnecting does not cause errors for the others.
 
 Simple control APIs:
 - Combined state (used by the web UI)
-	- `GET /state` → `{ "running": ..., "errorFree": ..., "domeClosedSensor": ..., "domeOpenedSensor": ..., "safetyMonitorState": ..., "safetyMonitorRaw": ..., "telescopeParked": ..., "isSafe": ... }`
+	- `GET /state` → `{ "running": ..., "errorFree": ..., "errorReason": ..., "domeClosedSensor": ..., "domeOpenedSensor": ..., "safetyMonitorState": ..., "safetyMonitorRaw": ..., "telescopeParked": ..., "isSafe": ... }`
 
 - Hardlink (Running)
 	- `GET /hardlink/state` → `{ "running": true|false }`
 	- `POST /hardlink/toggle` with `state=on|off|toggle` → `{ "ok": true, "running": ... }`
 
 - Error state (errorFree)
-	- `GET /errorfree/state` → `{ "errorFree": true|false }`
+	- `GET /errorfree/state` → `{ "errorFree": true|false, "errorReason": "..." }`
 	- `POST /errorfree/reset` → `{ "ok": true, "errorFree": true }`
 
 

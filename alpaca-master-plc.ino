@@ -64,6 +64,10 @@ volatile bool isSafe = false;
 volatile bool errorFree = true;
 volatile bool running = true;
 
+// reason for the first error since the last reset, only valid while errorFree
+// is false. Written by setError on the ReadStatesAndAct thread only.
+char errorReason[160] = "";
+
 // Blocking flags
 const unsigned long FUNCTION_TIMEOUT = 10000; // 10 seconds total timeout, per attempt
 const unsigned long DEVICE_TIMEOUT = 180000;  // 3 minutes total timeout
@@ -122,6 +126,30 @@ void debugPrint(const char *message, auto value)
     {
         Serial.print(message);
         Serial.println(value);
+    }
+}
+
+// Latch an error with a printf style reason. Only the first reason since the
+// last reset is kept, because later errors are often caused by the first one.
+// Only called from the ReadStatesAndAct thread.
+void setError(const char *format, ...)
+{
+    char reason[sizeof(errorReason)];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(reason, sizeof(reason), format, args);
+    va_end(args);
+
+    Serial.print("Error: ");
+    Serial.println(reason);
+
+    if (errorFree)
+    {
+        strcpy(errorReason, reason);
+
+        // the reason must be complete before the other thread sees errorFree false
+        __sync_synchronize();
+        errorFree = false;
     }
 }
 
@@ -316,7 +344,7 @@ void readStatesAndAct()
             debugPrint("Dome possibly stuck open and telescope not parked, aborting movements");
             abortDomeMovement();
             abortTelescopeMovement();
-            errorFree = false;
+            setError("Dome is between its open and closed sensors while the telescope is not parked, dome and telescope movements aborted");
         }
 
         bool action = (!safetyMonitorState || (domeClosedSensor && !telescopeParked)) && errorFree && running;
@@ -355,7 +383,7 @@ bool getTelescopeDirectParkedState()
 {
     debugPrint("Checking telescope parked state");
     // TCP/IP connection to the telescope
-    String response = simpleNetcat(telescopeDirectIP, telescopeDirectPort, ":Ginfo#", true);
+    String response = simpleNetcat("Telescope", telescopeDirectIP, telescopeDirectPort, ":Ginfo#", true);
 
     if (response.length() == 0)
     {
@@ -450,7 +478,7 @@ void parkTelescope()
 {
     debugPrint("Parking telescope");
     // Park the telescope
-    simpleNetcat(telescopeDirectIP, telescopeDirectPort, ":KA#", false);
+    simpleNetcat("Telescope", telescopeDirectIP, telescopeDirectPort, ":KA#", false);
     rtos::ThisThread::sleep_for(100);
 
     // Check if the telescope is parked in while loop, timeout after 180 seconds
@@ -467,7 +495,7 @@ void parkTelescope()
 
         if (millis() - startTime > DEVICE_TIMEOUT)
         {
-            errorFree = false;
+            setError("Telescope did not reach the park position within %lu s", DEVICE_TIMEOUT / 1000);
             break;
         }
         rtos::ThisThread::sleep_for(1000);
@@ -478,7 +506,7 @@ void closeDome()
 {
     debugPrint("Closing dome");
     // Close the dome
-    String payload = sendRequest("PUT", "/api/v1/dome/0/closeshutter", "", domeAlpacaIP, domeAlpacaPort);
+    String payload = sendRequest("Dome", "PUT", "/api/v1/dome/0/closeshutter", "", domeAlpacaIP, domeAlpacaPort);
 
     // Check if the dome is closed in while loop, timeout after 180 seconds
     unsigned long startTime = millis();
@@ -486,7 +514,7 @@ void closeDome()
     {
         if (millis() - startTime > DEVICE_TIMEOUT)
         {
-            errorFree = false;
+            setError("Dome closed sensor not active within %lu s of the close command", DEVICE_TIMEOUT / 1000);
             break;
         }
 
@@ -501,19 +529,22 @@ void abortDomeMovement()
 {
     debugPrint("Aborting dome movement");
     // Abort the dome movement
-    sendRequest("PUT", "/api/v1/dome/0/abortslew", "", domeAlpacaIP, domeAlpacaPort);
+    sendRequest("Dome", "PUT", "/api/v1/dome/0/abortslew", "", domeAlpacaIP, domeAlpacaPort);
 }
 
 void abortTelescopeMovement()
 {
     debugPrint("Aborting telescope movement");
     // Abort the telescope movement
-    simpleNetcat(telescopeDirectIP, telescopeDirectPort, ":STOP#", false);
+    simpleNetcat("Telescope", telescopeDirectIP, telescopeDirectPort, ":STOP#", false);
 }
 
 // Function to forward a request to a server and receive a response
-String sendRequest(const char *methodStr, const char *path, String requestBuffer, IPAddress targetServerIP, int targetServerPort)
+String sendRequest(const char *deviceName, const char *methodStr, const char *path, String requestBuffer, IPAddress targetServerIP, int targetServerPort)
 {
+    // why the last attempt failed, for the error reason
+    const char *failure = "no attempt made";
+
     for (int attempt = 1; attempt <= REQUEST_ATTEMPTS; attempt++)
     {
         // Per attempt timeout
@@ -553,6 +584,7 @@ String sendRequest(const char *methodStr, const char *path, String requestBuffer
         if (!connectSuccess)
         {
             Serial.println("Connection to target server failed");
+            failure = "connection failed";
             ethClient.stop();
             rtos::ThisThread::sleep_for(100);
             continue;
@@ -656,6 +688,7 @@ String sendRequest(const char *methodStr, const char *path, String requestBuffer
         if (readTimeout || body.length() == 0)
         {
             debugPrint("No usable response, retrying");
+            failure = readTimeout ? "response timed out" : "empty response";
             rtos::ThisThread::sleep_for(100);
             continue;
         }
@@ -663,16 +696,17 @@ String sendRequest(const char *methodStr, const char *path, String requestBuffer
         return body;
     }
 
-    errorFree = false;
-    Serial.print("Failed to send request after ");
-    Serial.print(REQUEST_ATTEMPTS);
-    Serial.println(" attempts");
+    setError("%s request %s %s failed after %d attempts: %s",
+             deviceName, methodStr, path, REQUEST_ATTEMPTS, failure);
     return "";
 }
 
 // Function to send data to a server and receive response
-String simpleNetcat(IPAddress host, int port, String content, bool expectResponse)
+String simpleNetcat(const char *deviceName, IPAddress host, int port, String content, bool expectResponse)
 {
+    // why the last attempt failed, for the error reason
+    const char *failure = "no attempt made";
+
     for (int attempt = 1; attempt <= REQUEST_ATTEMPTS; attempt++)
     {
         // Per attempt timeout
@@ -709,6 +743,7 @@ String simpleNetcat(IPAddress host, int port, String content, bool expectRespons
         if (!connectSuccess)
         {
             Serial.println("Connection to target server failed");
+            failure = "connection failed";
             netCatClient.stop();
             rtos::ThisThread::sleep_for(100);
             continue;
@@ -758,6 +793,7 @@ String simpleNetcat(IPAddress host, int port, String content, bool expectRespons
         if (!response.endsWith("#"))
         {
             debugPrint("Incomplete response, retrying");
+            failure = response.length() == 0 ? "no reply" : "incomplete reply";
             rtos::ThisThread::sleep_for(100);
             continue;
         }
@@ -765,10 +801,8 @@ String simpleNetcat(IPAddress host, int port, String content, bool expectRespons
         return response;
     }
 
-    errorFree = false;
-    Serial.print("Failed to send request after ");
-    Serial.print(REQUEST_ATTEMPTS);
-    Serial.println(" attempts");
+    setError("%s command %s failed after %d attempts: %s",
+             deviceName, content.c_str(), REQUEST_ATTEMPTS, failure);
     return "";
 }
 
@@ -1063,6 +1097,9 @@ void safetyMonitorEndPoint(Request &req, Response &res)
              "[{\"Name\":\"IsSafe\",\"Value\":%s}]",
              safe ? "true" : "false");
 
+    // must live until sendReply, the reply only keeps a pointer to it
+    char errorMessage[sizeof(errorReason) + 64];
+
     AlpacaReply reply;
 
     if (commonMember(member, isPut, params, safetyMonitorConnected, "Observatory safety monitor from the master PLC", deviceState, reply))
@@ -1073,7 +1110,9 @@ void safetyMonitorEndPoint(Request &req, Response &res)
     {
         if (!errorFree)
         {
-            reply.setError(ERROR_DRIVER, "Master PLC is in an error state, reset errors on the PLC web page");
+            snprintf(errorMessage, sizeof(errorMessage),
+                     "Master PLC error: %s. Reset errors on the PLC web page", errorReason);
+            reply.setError(ERROR_DRIVER, errorMessage);
         }
         else
         {
@@ -1241,7 +1280,9 @@ void errorFreeState(Request &req, Response &res)
     res.print("{");
     res.print("\"errorFree\": ");
     res.print(errorFree ? "true" : "false");
-    res.print("}");
+    res.print(", \"errorReason\": \"");
+    res.print(errorFree ? "" : errorReason);
+    res.print("\"}");
     res.end();
 }
 
@@ -1263,6 +1304,9 @@ void statusState(Request &req, Response &res)
     res.print(running ? "true" : "false");
     res.print(", \"errorFree\": ");
     res.print(errorFree ? "true" : "false");
+    res.print(", \"errorReason\": \"");
+    res.print(errorFree ? "" : errorReason);
+    res.print("\"");
     res.print(", \"domeClosedSensor\": ");
     res.print(domeClosedSensor ? "true" : "false");
     res.print(", \"domeOpenedSensor\": ");
@@ -1311,6 +1355,8 @@ void rootPage(Request &req, Response &res)
         .on { background: #2ecc71; color: #000; }
         .off { background: #e67e22; color: #000; }
         .reset { background: #93d4ff; color: #000; }
+        .reason { color: #e74c3c; font-size: 13px; margin: -6px 0 14px; }
+        .reason:empty { display: none; }
         .stale { color: #e74c3c; font-size: 13px; margin-top: 12px; display: none; }
         hr { border: none; border-top: 1px solid #333; margin: 22px 0; }
     </style>
@@ -1336,6 +1382,7 @@ void rootPage(Request &req, Response &res)
 
         <h3>Error state</h3>
         <div class="state">Current: <strong id="errorFree" class="unknown">&hellip;</strong></div>
+        <div id="errorReason" class="reason"></div>
         <button id="resetBtn" class="btn reset">Reset errors</button>
 
         <div id="stale" class="stale">Connection lost, values may be out of date.</div>
@@ -1360,6 +1407,7 @@ void rootPage(Request &req, Response &res)
             set('telescopeParked', s.telescopeParked ? 'Parked' : 'Not parked', s.telescopeParked ? 'ok' : 'unknown');
             set('running', s.running ? 'On' : 'Off', s.running ? 'ok' : 'warn');
             set('errorFree', s.errorFree ? 'OK' : 'Error', s.errorFree ? 'ok' : 'err');
+            set('errorReason', s.errorFree ? '' : s.errorReason, 'reason');
 
             running = s.running;
             toggleBtn.textContent = running ? 'Turn Off' : 'Turn On';
