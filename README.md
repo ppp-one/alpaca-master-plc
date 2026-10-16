@@ -88,13 +88,18 @@ Notes
 
 ## APIs
 
-ASCOM Alpaca (Safety Monitor):
-- `GET /api/v1/safetymonitor/0/connected` – connectivity check
+ASCOM Alpaca (ISafetyMonitorV3, device 0):
 - `GET /api/v1/safetymonitor/0/issafe` – safety status (filtered sensor AND error state)
-- `GET /api/v1/safetymonitor/0/name` – device name
-- `GET /api/v1/safetymonitor/0/driverversion` – driver version
+- `GET /api/v1/safetymonitor/0/devicestate` – `IsSafe`
+- All members common to every device: `connected` (GET/PUT), `connect`, `disconnect`, `connecting`, `name`, `description`, `driverinfo`, `driverversion`, `interfaceversion` (3), `supportedactions` (empty). `action` and `command*` return a not implemented error.
+- Management API: `/management/apiversions`, `/management/v1/description`, `/management/v1/configureddevices`
+- Alpaca discovery on UDP port 32227
 
-When the PLC is in an error state (`errorFree` is false), `issafe` returns an Alpaca device error: `ErrorNumber` 1280 (0x500, driver specific), a non-empty `ErrorMessage`, and `Value` false. Clients such as alpyca raise an exception on this response. The error clears when errors are reset on the web page.
+Parameter names are case insensitive. PUT parameters are read from the form body. An unknown member or endpoint returns HTTP 400.
+
+When the PLC is in an error state (`errorFree` is false), `issafe` returns an Alpaca device error: `ErrorNumber` 1280 (0x500, driver specific), a non-empty `ErrorMessage`, and no `Value`. Clients such as alpyca raise an exception on this response. `devicestate` reports `IsSafe` false. The error clears when errors are reset on the web page.
+
+`issafe` is not refused while disconnected, so one client disconnecting does not cause errors for the others.
 
 Simple control APIs:
 - Combined state (used by the web UI)

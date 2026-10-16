@@ -1,4 +1,5 @@
 #include <Ethernet.h>
+#include <EthernetUdp.h>
 #include <aWOT.h>
 #include "opta_info.h"
 #include <drivers/Watchdog.h>
@@ -74,16 +75,35 @@ const int REQUEST_ATTEMPTS = 3;
 // Thread for reading states
 static rtos::Thread ReadStatesAndActThread;
 
+// Alpaca error numbers. ERROR_DRIVER (0x500, first driver specific number)
+// is returned by issafe while errorFree is false.
+constexpr int32_t ERROR_NOT_IMPLEMENTED = 0x400;
+constexpr int32_t ERROR_ACTION_NOT_IMPLEMENTED = 0x40C;
+constexpr int32_t ERROR_DRIVER = 0x500;
+
+const char *DRIVER_VERSION = "0.1.0";
+const char *DEVICE_NAME = "Safety monitor from Master PLC";
+const unsigned int ALPACA_PORT = 80;
+const unsigned int DISCOVERY_PORT = 32227;
+
+// incremented on every Alpaca response, only used by the loop thread
+uint32_t serverTransactionID = 0;
+
+// ASCOM connected state. issafe is not refused while disconnected, so one
+// client disconnecting does not make the others see an error. It starts
+// connected so clients do not see a disconnected device after a watchdog reset.
+bool safetyMonitorConnected = true;
+
+// unique ID for the management API, filled from the MAC address in setup
+char safetyMonitorUniqueID[40];
+
+// declared early for the prototypes the Arduino builder adds
+struct AlpacaReply;
+
 // Initialize the Ethernet server and aWOT application
-EthernetServer server(80);
+EthernetServer server(ALPACA_PORT);
+EthernetUDP discoveryUdp;
 Application app;
-
-// Alpaca transaction counter, incremented on every Alpaca request
-uint32_t ServerTransactionID = 0;
-
-// Alpaca error number for a latched PLC error (errorFree false).
-// 0x500 to 0xFFF is the range for driver specific errors.
-constexpr int32_t ERROR_PLC_FAULT = 0x500;
 
 // Debug flag - set to true for Serial debugging
 const bool DEBUG = true;
@@ -752,103 +772,388 @@ String simpleNetcat(IPAddress host, int port, String content, bool expectRespons
     return "";
 }
 
-// Handle the endpoint requests
-void endPoint(Request &req, Response &res)
+// Alpaca parameter names are case insensitive. GET parameters are in the
+// query string, PUT parameters are in the form encoded body.
+void readParams(Request &req, char *params, int length)
 {
+    params[0] = '\0';
 
-    auto url = split(req.path(), '/', 5);
-
-    uint32_t ClientTransactionID = 0;
-
-    // Alpaca: 1 to 4294967295, unique for each transaction
-    if (++ServerTransactionID == 0)
+    if (req.method() == Request::GET)
     {
-        ServerTransactionID = 1;
-    }
-
-    // Alpaca: 0 and "" on success, otherwise 0x400 to 0xFFF and a message
-    int32_t ErrorNumber = 0;
-    String ErrorMessage = "";
-
-    String ValueString;
-    bool ValueBool = false;
-    bool hasString = false;
-    bool hasBool = false;
-
-    char buffer[16]; // Adjust the buffer size as needed
-
-    if (req.query("ClientTransactionID", buffer, sizeof(buffer)))
-    {
-        ClientTransactionID = strtoul(buffer, NULL, 10);
-    }
-
-    if (url == "connected")
-    {
-        ValueBool = true;
-        hasBool = true;
-    }
-    else if (url == "name")
-    {
-        ValueString = "Safety monitor from Master PLC";
-        hasString = true;
-    }
-    else if (url == "driverversion")
-    {
-        ValueString = "0.0.2";
-        hasString = true;
-    }
-    else if (url == "issafe")
-    {
-        // A latched PLC error is reported as an Alpaca device error, so the
-        // client knows the state cannot be trusted. Value stays false for
-        // clients that ignore ErrorNumber.
-        if (!errorFree)
-        {
-            ErrorNumber = ERROR_PLC_FAULT;
-            ErrorMessage = "Master PLC is in an error state, reset errors on the PLC web page";
-        }
-        ValueBool = isSafe && errorFree;
-        hasBool = true;
+        strncpy(params, req.query(), length - 1);
+        params[length - 1] = '\0';
     }
     else
     {
-        // Alpaca: an unknown operation is an HTTP 400 with a text message
+        int toRead = min(req.left(), length - 1);
+        int count = req.readBytes(params, toRead);
+        params[count] = '\0';
+    }
+}
+
+bool findParam(const char *params, const char *name, char *value, int valueLength)
+{
+    size_t nameLength = strlen(name);
+    const char *position = params;
+
+    while (*position)
+    {
+        const char *end = strchr(position, '&');
+        if (end == NULL)
+        {
+            end = position + strlen(position);
+        }
+
+        const char *equals = (const char *)memchr(position, '=', end - position);
+        if (equals != NULL && (size_t)(equals - position) == nameLength && strncasecmp(position, name, nameLength) == 0)
+        {
+            int count = min((int)(end - equals - 1), valueLength - 1);
+            memcpy(value, equals + 1, count);
+            value[count] = '\0';
+            return true;
+        }
+
+        position = *end ? end + 1 : end;
+    }
+
+    return false;
+}
+
+// Returns true if the parameter is "true" or "false", and sets result
+bool findBoolParam(const char *params, const char *name, bool &result)
+{
+    char value[8];
+    if (!findParam(params, name, value, sizeof(value)))
+    {
+        return false;
+    }
+    if (strcasecmp(value, "true") == 0)
+    {
+        result = true;
+        return true;
+    }
+    if (strcasecmp(value, "false") == 0)
+    {
+        result = false;
+        return true;
+    }
+    return false;
+}
+
+// Reply to one Alpaca request
+struct AlpacaReply
+{
+    enum Type
+    {
+        NONE, // method without a return value
+        BOOL,
+        INT,
+        STRING,
+        JSON // value printed as is, for arrays and objects
+    };
+
+    Type type = NONE;
+    bool boolValue = false;
+    int32_t intValue = 0;
+    const char *text = "";
+    int32_t errorNumber = 0;
+    const char *errorMessage = "";
+    bool badRequest = false;
+
+    void setBool(bool value)
+    {
+        type = BOOL;
+        boolValue = value;
+    }
+
+    void setInt(int32_t value)
+    {
+        type = INT;
+        intValue = value;
+    }
+
+    void setString(const char *value)
+    {
+        type = STRING;
+        text = value;
+    }
+
+    void setJson(const char *value)
+    {
+        type = JSON;
+        text = value;
+    }
+
+    void setError(int32_t number, const char *message)
+    {
+        errorNumber = number;
+        errorMessage = message;
+    }
+
+    void setBadRequest(const char *message)
+    {
+        badRequest = true;
+        errorMessage = message;
+    }
+};
+
+void sendReply(Response &res, const char *params, AlpacaReply &reply)
+{
+    if (reply.badRequest)
+    {
         res.status(400);
         res.set("Content-Type", "text/plain");
-        res.print("Invalid path");
+        res.print(reply.errorMessage);
+        res.end();
         return;
     }
 
-    res.set("Content-Type", "application/json");
-    res.print("{");
-    res.print("\"ClientTransactionID\": ");
-    res.print(ClientTransactionID);
-    res.print(", ");
-    res.print("\"ServerTransactionID\": ");
-    res.print(ServerTransactionID);
-    res.print(", ");
-    res.print("\"ErrorNumber\": ");
-    res.print(ErrorNumber);
-    res.print(", ");
-    res.print("\"ErrorMessage\": \"");
-    res.print(ErrorMessage);
-    res.print("\", ");
-    res.print("\"Value\": ");
-    if (hasString)
+    char buffer[16];
+    uint32_t clientTransactionID = 0;
+    if (findParam(params, "ClientTransactionID", buffer, sizeof(buffer)))
     {
-        res.print("\"");
-        res.print(ValueString);
-        res.print("\"");
+        clientTransactionID = strtoul(buffer, NULL, 10);
     }
-    else if (hasBool)
+
+    // Alpaca: 1 to 4294967295, unique for each transaction
+    if (++serverTransactionID == 0)
     {
-        res.print(ValueBool ? "true" : "false");
+        serverTransactionID = 1;
+    }
+
+    res.set("Content-Type", "application/json");
+    res.print("{\"ClientTransactionID\":");
+    res.print(clientTransactionID);
+    res.print(",\"ServerTransactionID\":");
+    res.print(serverTransactionID);
+    res.print(",\"ErrorNumber\":");
+    res.print(reply.errorNumber);
+    res.print(",\"ErrorMessage\":\"");
+    res.print(reply.errorMessage);
+    res.print("\"");
+
+    // a value is only sent when there is no error
+    if (reply.errorNumber == 0 && reply.type != AlpacaReply::NONE)
+    {
+        res.print(",\"Value\":");
+        switch (reply.type)
+        {
+        case AlpacaReply::BOOL:
+            res.print(reply.boolValue ? "true" : "false");
+            break;
+        case AlpacaReply::INT:
+            res.print(reply.intValue);
+            break;
+        case AlpacaReply::STRING:
+            res.print("\"");
+            res.print(reply.text);
+            res.print("\"");
+            break;
+        default:
+            res.print(reply.text);
+            break;
+        }
+    }
+
+    res.print("}");
+    res.end();
+}
+
+// Members common to all device types. Returns false if the member is unknown.
+bool commonMember(const char *member, bool isPut, const char *params, bool &connected,
+                  const char *description, const char *deviceState, AlpacaReply &reply)
+{
+    if (isPut)
+    {
+        if (strcmp(member, "connected") == 0)
+        {
+            bool value;
+            if (!findBoolParam(params, "Connected", value))
+            {
+                reply.setBadRequest("Connected parameter missing or invalid");
+            }
+            else
+            {
+                connected = value;
+            }
+        }
+        else if (strcmp(member, "connect") == 0)
+        {
+            connected = true;
+        }
+        else if (strcmp(member, "disconnect") == 0)
+        {
+            connected = false;
+        }
+        else if (strcmp(member, "action") == 0)
+        {
+            reply.setError(ERROR_ACTION_NOT_IMPLEMENTED, "No actions are supported");
+        }
+        else if (strcmp(member, "commandblind") == 0 || strcmp(member, "commandbool") == 0 || strcmp(member, "commandstring") == 0)
+        {
+            reply.setError(ERROR_NOT_IMPLEMENTED, "Commands are not implemented");
+        }
+        else
+        {
+            return false;
+        }
+        return true;
+    }
+
+    if (strcmp(member, "connected") == 0)
+    {
+        reply.setBool(connected);
+    }
+    else if (strcmp(member, "connecting") == 0)
+    {
+        reply.setBool(false);
+    }
+    else if (strcmp(member, "name") == 0)
+    {
+        reply.setString(DEVICE_NAME);
+    }
+    else if (strcmp(member, "description") == 0)
+    {
+        reply.setString(description);
+    }
+    else if (strcmp(member, "driverinfo") == 0)
+    {
+        reply.setString("Arduino Opta master safety PLC");
+    }
+    else if (strcmp(member, "driverversion") == 0)
+    {
+        reply.setString(DRIVER_VERSION);
+    }
+    else if (strcmp(member, "interfaceversion") == 0)
+    {
+        reply.setInt(3);
+    }
+    else if (strcmp(member, "supportedactions") == 0)
+    {
+        reply.setJson("[]");
+    }
+    else if (strcmp(member, "devicestate") == 0)
+    {
+        reply.setJson(deviceState);
     }
     else
     {
-        res.print("null");
+        return false;
     }
-    res.print("}");
+    return true;
+}
+
+// Handle the safety monitor endpoint requests
+void safetyMonitorEndPoint(Request &req, Response &res)
+{
+    char member[32];
+    char params[256];
+    req.route("member", member, sizeof(member));
+    readParams(req, params, sizeof(params));
+    bool isPut = req.method() == Request::PUT;
+
+    debugPrint("Safety monitor request: ", member);
+
+    // A latched PLC error is reported as an Alpaca device error on issafe and
+    // as unsafe in devicestate, so the client never trusts a stale state
+    bool safe = isSafe && errorFree;
+
+    char deviceState[48];
+    snprintf(deviceState, sizeof(deviceState),
+             "[{\"Name\":\"IsSafe\",\"Value\":%s}]",
+             safe ? "true" : "false");
+
+    AlpacaReply reply;
+
+    if (commonMember(member, isPut, params, safetyMonitorConnected, "Observatory safety monitor from the master PLC", deviceState, reply))
+    {
+        // handled
+    }
+    else if (!isPut && strcmp(member, "issafe") == 0)
+    {
+        if (!errorFree)
+        {
+            reply.setError(ERROR_DRIVER, "Master PLC is in an error state, reset errors on the PLC web page");
+        }
+        else
+        {
+            reply.setBool(safe);
+        }
+    }
+    else
+    {
+        reply.setBadRequest("Unknown safety monitor member");
+    }
+
+    sendReply(res, params, reply);
+}
+
+// Management API
+
+void apiVersions(Request &req, Response &res)
+{
+    char params[256];
+    readParams(req, params, sizeof(params));
+    AlpacaReply reply;
+    reply.setJson("[1]");
+    sendReply(res, params, reply);
+}
+
+void managementDescription(Request &req, Response &res)
+{
+    char params[256];
+    readParams(req, params, sizeof(params));
+    char description[160];
+    snprintf(description, sizeof(description),
+             "{\"ServerName\":\"Alpaca master PLC\",\"Manufacturer\":\"PPP\",\"ManufacturerVersion\":\"%s\",\"Location\":\"Observatory\"}",
+             DRIVER_VERSION);
+    AlpacaReply reply;
+    reply.setJson(description);
+    sendReply(res, params, reply);
+}
+
+void configuredDevices(Request &req, Response &res)
+{
+    char params[256];
+    readParams(req, params, sizeof(params));
+    char devices[160];
+    snprintf(devices, sizeof(devices),
+             "[{\"DeviceName\":\"%s\",\"DeviceType\":\"SafetyMonitor\",\"DeviceNumber\":0,\"UniqueID\":\"%s\"}]",
+             DEVICE_NAME, safetyMonitorUniqueID);
+    AlpacaReply reply;
+    reply.setJson(devices);
+    sendReply(res, params, reply);
+}
+
+// Runs last, for any request no route has answered
+void badRequest(Request &req, Response &res)
+{
+    res.status(400);
+    res.set("Content-Type", "text/plain");
+    res.print("Unknown endpoint");
+    res.end();
+}
+
+// Answer Alpaca discovery broadcasts with the HTTP port
+void handleDiscovery()
+{
+    int size = discoveryUdp.parsePacket();
+    if (size <= 0)
+    {
+        return;
+    }
+
+    char packet[32] = {0};
+    discoveryUdp.read(packet, min(size, (int)sizeof(packet) - 1));
+
+    if (strncmp(packet, "alpacadiscovery", 15) == 0)
+    {
+        char reply[24];
+        snprintf(reply, sizeof(reply), "{\"AlpacaPort\":%u}", ALPACA_PORT);
+        discoveryUdp.beginPacket(discoveryUdp.remoteIP(), discoveryUdp.remotePort());
+        discoveryUdp.write((const uint8_t *)reply, strlen(reply));
+        discoveryUdp.endPacket();
+    }
 }
 
 // Simple API: get running state
@@ -859,6 +1164,7 @@ void hardlinkState(Request &req, Response &res)
         res.print("\"running\": ");
         res.print(running ? "true" : "false");
         res.print("}");
+        res.end();
 }
 
 // Simple API: toggle/set running state via form or query param `state` = on|off|toggle
@@ -910,6 +1216,7 @@ void hardlinkToggle(Request &req, Response &res)
                 else
                 {
                         res.sendStatus(400);
+                        res.end();
                         return;
                 }
         }
@@ -924,6 +1231,7 @@ void hardlinkToggle(Request &req, Response &res)
         res.print("\"ok\": true, \"running\": ");
         res.print(running ? "true" : "false");
         res.print("}");
+        res.end();
 }
 
 // API: get current errorFree state
@@ -934,6 +1242,7 @@ void errorFreeState(Request &req, Response &res)
     res.print("\"errorFree\": ");
     res.print(errorFree ? "true" : "false");
     res.print("}");
+    res.end();
 }
 
 // API: reset errorFree to true
@@ -942,6 +1251,7 @@ void errorFreeReset(Request &req, Response &res)
     errorFree = true;
     res.set("Content-Type", "application/json");
     res.print("{\"ok\": true, \"errorFree\": true}");
+    res.end();
 }
 
 // API: all states in one response, used by the page to refresh itself
@@ -966,6 +1276,7 @@ void statusState(Request &req, Response &res)
     res.print(", \"isSafe\": ");
     res.print(isSafe ? "true" : "false");
     res.print("}");
+    res.end();
 }
 
 // Single UI page at root with sensor readout, hardlink toggle and error reset
@@ -1100,6 +1411,7 @@ void rootPage(Request &req, Response &res)
 </body>
 </html>
 )~");
+        res.end();
 }
 
 void setup()
@@ -1161,12 +1473,16 @@ void setup()
     attachInterrupt(digitalPinToInterrupt(domeClosedSensorPin), domeClosedSensorISR, CHANGE);
     attachInterrupt(digitalPinToInterrupt(domeOpenedSensorPin), domeOpenedSensorISR, CHANGE);
 
-    // Define endpoints
-    app.get("/api/v1/safetymonitor/0/connected", &endPoint);
-    app.put("/api/v1/safetymonitor/0/connected", &endPoint);
-    app.get("/api/v1/safetymonitor/0/issafe", &endPoint);
-    app.get("/api/v1/safetymonitor/0/name", &endPoint);
-    app.get("/api/v1/safetymonitor/0/driverversion", &endPoint);
+    snprintf(safetyMonitorUniqueID, sizeof(safetyMonitorUniqueID), "%02x%02x%02x%02x-%02x%02x-4000-8000-000000000001",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    // Alpaca endpoints
+    app.get("/api/v1/safetymonitor/0/:member", &safetyMonitorEndPoint);
+    app.put("/api/v1/safetymonitor/0/:member", &safetyMonitorEndPoint);
+
+    app.get("/management/apiversions", &apiVersions);
+    app.get("/management/v1/description", &managementDescription);
+    app.get("/management/v1/configureddevices", &configuredDevices);
 
     // Control page with sensor readout, hardlink toggle and error reset
     app.get("/", &rootPage);
@@ -1180,11 +1496,15 @@ void setup()
     app.get("/errorfree/state", &errorFreeState);
     app.post("/errorfree/reset", &errorFreeReset);
 
+    // must be registered last, every handler above must call res.end()
+    app.use(&badRequest);
+
     // start ReadStatesAndActThread thread
     ReadStatesAndActThread.start(readStatesAndAct);
 
     // begin the server
     server.begin();
+    discoveryUdp.begin(DISCOVERY_PORT);
     debugPrint("Server started");
 }
 
@@ -1192,6 +1512,7 @@ void loop()
 {
     checkUserButton();
     sampleSafetyMonitor();
+    handleDiscovery();
 
     EthernetClient client = server.available();
 
