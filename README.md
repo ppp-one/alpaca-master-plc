@@ -14,7 +14,7 @@ This PLC acts as a master safety controller that:
 ## How It Works
 
 The PLC continuously monitors three inputs:
-1. **Safety Monitor Sensor** (A4): External safety signal (HIGH = safe, LOW = unsafe)
+1. **Safety Monitor Sensor** (A4): External safety signal (HIGH = safe, LOW = unsafe). The input is sampled once a second. The PLC uses the median (majority vote) of the last 60 samples, so short spurious changes are ignored. A real change takes effect after about 30 seconds.
 2. **Dome Closed Sensor** (A2): Detects when dome is fully closed
 3. **Dome Opened Sensor** (A3): Detects when dome is fully open
 4. **Telescope Park Status**: Queried via direct TCP commands to the 10Micron telescope controller
@@ -46,7 +46,7 @@ In addition, it provides a tiny web UI and simple control APIs (documented below
 - Connect safety sensor to **A4** (HIGH = safe)
 - Connect dome closed sensor to **A2** (HIGH when closed)
 - Connect dome opened sensor to **A3** (HIGH when open)
-- LEDs D0, D1, D2, D3 indicate dome closed, dome opened, safety status, and telescope parked respectively
+- LEDs D0, D1, D2, D3 indicate dome closed, dome opened, safety status (filtered over 1 minute), and telescope parked respectively
 - User LED flashes slowly under normal operation, fast when error encountered, or off when disabled
 - Holding the **USER button** for 3 seconds toggles the hardlink on/off
 
@@ -74,7 +74,7 @@ Edit IP addresses in [alpaca-master-plc.ino](alpaca-master-plc.ino):
 Control page: `http://192.168.1.10/`
 
 - Sensors
-	- Live readout of the dome closed, dome opened, and safety monitor inputs, plus the telescope park state (refreshed every 2 s)
+	- Live readout of the dome closed, dome opened, and safety monitor inputs (filtered and raw), plus the telescope park state (refreshed every 2 s)
 
 - Hardlink automatic control
 	- Shows current "Running" state and a button to toggle it
@@ -90,13 +90,15 @@ Notes
 
 ASCOM Alpaca (Safety Monitor):
 - `GET /api/v1/safetymonitor/0/connected` – connectivity check
-- `GET /api/v1/safetymonitor/0/issafe` – safety status (sensor AND error state)
+- `GET /api/v1/safetymonitor/0/issafe` – safety status (filtered sensor AND error state)
 - `GET /api/v1/safetymonitor/0/name` – device name
 - `GET /api/v1/safetymonitor/0/driverversion` – driver version
 
+When the PLC is in an error state (`errorFree` is false), `issafe` returns an Alpaca device error: `ErrorNumber` 1280 (0x500, driver specific), a non-empty `ErrorMessage`, and `Value` false. Clients such as alpyca raise an exception on this response. The error clears when errors are reset on the web page.
+
 Simple control APIs:
 - Combined state (used by the web UI)
-	- `GET /state` → `{ "running": ..., "errorFree": ..., "domeClosedSensor": ..., "domeOpenedSensor": ..., "safetyMonitorState": ..., "telescopeParked": ..., "isSafe": ... }`
+	- `GET /state` → `{ "running": ..., "errorFree": ..., "domeClosedSensor": ..., "domeOpenedSensor": ..., "safetyMonitorState": ..., "safetyMonitorRaw": ..., "telescopeParked": ..., "isSafe": ... }`
 
 - Hardlink (Running)
 	- `GET /hardlink/state` → `{ "running": true|false }`

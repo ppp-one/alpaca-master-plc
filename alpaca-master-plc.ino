@@ -35,8 +35,17 @@ volatile bool domeOpenedSensor;
 constexpr int domeOpenedSensorPin = A3;
 
 // safety monitor
+// The raw input is sampled once a second. safetyMonitorState is the median
+// (majority vote) of the last minute of samples, so short spurious changes on
+// the input are ignored. A real change takes effect after ~30 seconds.
 volatile bool safetyMonitorState;
+volatile bool safetyMonitorRaw;
 constexpr int safetyMonitorPin = A4;
+constexpr int SAFETY_SAMPLES = 60;                    // 1 minute window
+constexpr unsigned long SAFETY_SAMPLE_INTERVAL = 1000; // 1 second
+bool safetySamples[SAFETY_SAMPLES];
+int safetySampleIndex = 0;
+int safetySafeCount = 0;
 
 // telescope park state, polled by readStatesAndAct
 volatile bool telescopeParked = false;
@@ -69,9 +78,12 @@ static rtos::Thread ReadStatesAndActThread;
 EthernetServer server(80);
 Application app;
 
-// Alpaca error handling
-int32_t ErrorNumber = 0;
-String ErrorMessage = "\"\"";
+// Alpaca transaction counter, incremented on every Alpaca request
+uint32_t ServerTransactionID = 0;
+
+// Alpaca error number for a latched PLC error (errorFree false).
+// 0x500 to 0xFFF is the range for driver specific errors.
+constexpr int32_t ERROR_PLC_FAULT = 0x500;
 
 // Debug flag - set to true for Serial debugging
 const bool DEBUG = true;
@@ -183,23 +195,49 @@ void domeOpenedSensorISR()
     }
 }
 
-// ISR for safety monitor
-void safetyMonitorISR()
+// Set the filtered safety monitor state and keep its LED in sync
+void setSafetyMonitorState(bool state)
 {
-    safetyMonitorState = digitalRead(safetyMonitorPin) == HIGH;
+    safetyMonitorState = state;
+    isSafe = state;
+    digitalWrite(SAFETY_SIGNAL_LED, state ? HIGH : LOW);
+}
 
-    if (safetyMonitorState)
+// Fill the whole window with the current input, so the state is valid at boot
+void initSafetyMonitor()
+{
+    safetyMonitorRaw = digitalRead(safetyMonitorPin) == HIGH;
+
+    for (int i = 0; i < SAFETY_SAMPLES; i++)
     {
-        // LED on
-        digitalWrite(SAFETY_SIGNAL_LED, HIGH);
-        isSafe = true;
+        safetySamples[i] = safetyMonitorRaw;
     }
-    else
+    safetySafeCount = safetyMonitorRaw ? SAFETY_SAMPLES : 0;
+
+    setSafetyMonitorState(safetyMonitorRaw);
+}
+
+// Sample the safety input once a second into the window, called from loop().
+// The state is safe only when more than half of the samples are safe, a tie
+// counts as unsafe.
+void sampleSafetyMonitor()
+{
+    static unsigned long lastSample = 0;
+
+    if (millis() - lastSample < SAFETY_SAMPLE_INTERVAL)
     {
-        // LED off
-        digitalWrite(SAFETY_SIGNAL_LED, LOW);
-        isSafe = false;
+        return;
     }
+    lastSample = millis();
+
+    safetyMonitorRaw = digitalRead(safetyMonitorPin) == HIGH;
+
+    // replace the oldest sample and keep the running count of safe samples
+    safetySafeCount += (int)safetyMonitorRaw - (int)safetySamples[safetySampleIndex];
+    safetySamples[safetySampleIndex] = safetyMonitorRaw;
+    safetySampleIndex = (safetySampleIndex + 1) % SAFETY_SAMPLES;
+
+    setSafetyMonitorState(safetySafeCount > SAFETY_SAMPLES / 2);
 }
 
 // Read all states
@@ -244,6 +282,8 @@ void readStatesAndAct()
         setTelescopeParked(getTelescopeDirectParkedState());
 
         debugPrint("Safety monitor state: ", safetyMonitorState);
+        debugPrint("Safety monitor raw: ", safetyMonitorRaw);
+        debugPrint("Safety monitor safe samples: ", safetySafeCount);
         debugPrint("Dome closed state: ", domeClosedSensor);
         debugPrint("Dome opened state: ", domeOpenedSensor);
         debugPrint("Telescope parked state: ", telescopeParked);
@@ -716,27 +756,26 @@ String simpleNetcat(IPAddress host, int port, String content, bool expectRespons
 void endPoint(Request &req, Response &res)
 {
 
-    res.set("Content-Type", "application/json");
     auto url = split(req.path(), '/', 5);
 
-    uint32_t ClientID = 0;
     uint32_t ClientTransactionID = 0;
 
-    uint32_t ServerID = 0;            // TODO: what is this?
-    uint32_t ServerTransactionID = 0; // TODO: what is this? increment?
+    // Alpaca: 1 to 4294967295, unique for each transaction
+    if (++ServerTransactionID == 0)
+    {
+        ServerTransactionID = 1;
+    }
 
-    float Value = 0.0f;
+    // Alpaca: 0 and "" on success, otherwise 0x400 to 0xFFF and a message
+    int32_t ErrorNumber = 0;
+    String ErrorMessage = "";
+
     String ValueString;
     bool ValueBool = false;
     bool hasString = false;
     bool hasBool = false;
 
     char buffer[16]; // Adjust the buffer size as needed
-
-    if (req.query("ClientID", buffer, sizeof(buffer)))
-    {
-        ClientID = strtoul(buffer, NULL, 10);
-    }
 
     if (req.query("ClientTransactionID", buffer, sizeof(buffer)))
     {
@@ -760,31 +799,40 @@ void endPoint(Request &req, Response &res)
     }
     else if (url == "issafe")
     {
+        // A latched PLC error is reported as an Alpaca device error, so the
+        // client knows the state cannot be trusted. Value stays false for
+        // clients that ignore ErrorNumber.
+        if (!errorFree)
+        {
+            ErrorNumber = ERROR_PLC_FAULT;
+            ErrorMessage = "Master PLC is in an error state, reset errors on the PLC web page";
+        }
         ValueBool = isSafe && errorFree;
         hasBool = true;
     }
     else
     {
-        ErrorNumber = 1;
-        ErrorMessage = "\"Invalid path\"";
+        // Alpaca: an unknown operation is an HTTP 400 with a text message
+        res.status(400);
+        res.set("Content-Type", "text/plain");
+        res.print("Invalid path");
+        return;
     }
 
+    res.set("Content-Type", "application/json");
     res.print("{");
-    res.print("\"ClientID\": ");
-    res.print(ClientID);
-    res.print(", ");
     res.print("\"ClientTransactionID\": ");
     res.print(ClientTransactionID);
     res.print(", ");
-    res.print("\"ServerID\": ");
-    res.print(ServerID);
+    res.print("\"ServerTransactionID\": ");
+    res.print(ServerTransactionID);
     res.print(", ");
     res.print("\"ErrorNumber\": ");
     res.print(ErrorNumber);
     res.print(", ");
-    res.print("\"ErrorMessage\": ");
+    res.print("\"ErrorMessage\": \"");
     res.print(ErrorMessage);
-    res.print(", ");
+    res.print("\", ");
     res.print("\"Value\": ");
     if (hasString)
     {
@@ -801,10 +849,6 @@ void endPoint(Request &req, Response &res)
         res.print("null");
     }
     res.print("}");
-
-    // reset error
-    ErrorNumber = 0;
-    ErrorMessage = "\"\"";
 }
 
 // Simple API: get running state
@@ -915,6 +959,8 @@ void statusState(Request &req, Response &res)
     res.print(domeOpenedSensor ? "true" : "false");
     res.print(", \"safetyMonitorState\": ");
     res.print(safetyMonitorState ? "true" : "false");
+    res.print(", \"safetyMonitorRaw\": ");
+    res.print(safetyMonitorRaw ? "true" : "false");
     res.print(", \"telescopeParked\": ");
     res.print(telescopeParked ? "true" : "false");
     res.print(", \"isSafe\": ");
@@ -965,7 +1011,8 @@ void rootPage(Request &req, Response &res)
         <h3>Sensors</h3>
         <div class="row"><span>Dome closed</span><strong id="domeClosedSensor" class="unknown">&hellip;</strong></div>
         <div class="row"><span>Dome opened</span><strong id="domeOpenedSensor" class="unknown">&hellip;</strong></div>
-        <div class="row"><span>Safety monitor</span><strong id="safetyMonitorState" class="unknown">&hellip;</strong></div>
+        <div class="row"><span>Safety monitor (1 min)</span><strong id="safetyMonitorState" class="unknown">&hellip;</strong></div>
+        <div class="row"><span>Safety monitor (raw)</span><strong id="safetyMonitorRaw" class="unknown">&hellip;</strong></div>
         <div class="row"><span>Telescope</span><strong id="telescopeParked" class="unknown">&hellip;</strong></div>
 
         <hr>
@@ -998,6 +1045,7 @@ void rootPage(Request &req, Response &res)
             set('domeClosedSensor', s.domeClosedSensor ? 'Closed' : 'Not closed', s.domeClosedSensor ? 'ok' : 'unknown');
             set('domeOpenedSensor', s.domeOpenedSensor ? 'Opened' : 'Not opened', s.domeOpenedSensor ? 'ok' : 'unknown');
             set('safetyMonitorState', s.safetyMonitorState ? 'Safe' : 'Unsafe', s.safetyMonitorState ? 'ok' : 'err');
+            set('safetyMonitorRaw', s.safetyMonitorRaw ? 'Safe' : 'Unsafe', s.safetyMonitorRaw ? 'ok' : 'err');
             set('telescopeParked', s.telescopeParked ? 'Parked' : 'Not parked', s.telescopeParked ? 'ok' : 'unknown');
             set('running', s.running ? 'On' : 'Off', s.running ? 'ok' : 'warn');
             set('errorFree', s.errorFree ? 'OK' : 'Error', s.errorFree ? 'ok' : 'err');
@@ -1102,7 +1150,9 @@ void setup()
     // call all ISRs
     domeClosedSensorISR();
     domeOpenedSensorISR();
-    safetyMonitorISR();
+
+    // the safety monitor is polled from loop(), not by an interrupt
+    initSafetyMonitor();
 
     // parked state is unknown until the first poll
     setTelescopeParked(false);
@@ -1110,7 +1160,6 @@ void setup()
     // Attach interrupts to the sensors
     attachInterrupt(digitalPinToInterrupt(domeClosedSensorPin), domeClosedSensorISR, CHANGE);
     attachInterrupt(digitalPinToInterrupt(domeOpenedSensorPin), domeOpenedSensorISR, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(safetyMonitorPin), safetyMonitorISR, CHANGE);
 
     // Define endpoints
     app.get("/api/v1/safetymonitor/0/connected", &endPoint);
@@ -1142,6 +1191,7 @@ void setup()
 void loop()
 {
     checkUserButton();
+    sampleSafetyMonitor();
 
     EthernetClient client = server.available();
 
